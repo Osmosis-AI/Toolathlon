@@ -1,0 +1,408 @@
+"""Container lifecycle manager for v2 task executions.
+
+Translates the decoupled-mode shell workflow (``run_single_decoupled.sh``)
+into Python, managing the full lifecycle of per-task containers:
+
+  1. Deploy shared infrastructure (K8s, email, WooCommerce, etc.) — once per session
+  2. Start a container for the task
+  3. Copy project files and task data into the container
+  4. Run preprocess (``container_preprocess.py``) to set up MCP servers
+  5. Start the tool gateway (``container_tool_gateway.py``) inside the container
+  6. Wait for gateway health and query available tool schemas
+  7. Forward tool calls from the client to the gateway (via ``tool_proxy``)
+  8. Run evaluation (``container_eval.py``) when the client requests grading
+  9. Tear down the container
+
+Supports both Docker and Podman (auto-detected from ``global_configs.py``).
+"""
+
+import asyncio
+import json
+import os
+import socket
+import subprocess
+import uuid
+from pathlib import Path
+from typing import List
+
+import httpx
+
+from .models import GradeResponse, ToolDef
+from .session import ExecutionState, SessionState, log
+
+PROJECT_ROOT = Path(__file__).parent.parent.resolve()
+TASKS_DIR = PROJECT_ROOT / "tasks" / "finalpool"
+DUMPS_BASE = PROJECT_ROOT / "dumps_v2"
+
+DEFAULT_IMAGE = "lockon0927/toolathlon-task-image:1016beta"
+DEFAULT_EVAL_CONFIG = "scripts/formal_run_v0.json"
+DEFAULT_MAX_STEP = 100
+DEFAULT_MODEL_SHORT_NAME = "v2-sandbox-model"
+DEFAULT_PROVIDER = "unified"
+
+GATEWAY_STARTUP_TIMEOUT = 40  # seconds to wait for gateway /health
+TOOL_QUERY_TIMEOUT = 10       # seconds to wait for GET /tools
+
+# Project files copied into every task container (mirrors run_single_decoupled.sh)
+FILES_TO_COPY = [
+    "configs",
+    "deployment/k8s",
+    "scripts",
+    "deployment/canvas/logs",
+    "global_preparation/check_installation.py",
+    "local_binary/github-mcp-server",
+    "utils",
+    "main.py",
+]
+
+
+def _get_container_runtime() -> str:
+    try:
+        import sys
+        sys.path.insert(0, str(PROJECT_ROOT / "configs"))
+        from global_configs import global_configs
+        return global_configs.get("podman_or_docker", "docker")
+    except Exception:
+        return "docker"
+
+
+def _get_instance_prefix() -> str:
+    try:
+        import yaml
+        config_path = PROJECT_ROOT / "configs" / "ports_config.yaml"
+        if config_path.exists():
+            with open(config_path, "r") as f:
+                config = yaml.safe_load(f)
+                return config.get("instance_prefix", "") or ""
+    except Exception:
+        pass
+    return ""
+
+
+def _get_image_name() -> str:
+    return os.environ.get("TOOLATHLON_V2_IMAGE", DEFAULT_IMAGE)
+
+
+def _allocate_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _run_cmd(cmd: List[str], timeout: int = 120) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+async def _run_cmd_async(cmd: List[str], timeout: int = 300) -> tuple:
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    try:
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise
+    return proc.returncode, stdout.decode("utf-8", errors="replace")
+
+
+async def _deploy_infrastructure() -> None:
+    """Run deploy_containers.sh to start shared infrastructure (K8s, Poste, WooCommerce, Canvas)."""
+    deploy_script = PROJECT_ROOT / "global_preparation" / "deploy_containers.sh"
+    if not deploy_script.exists():
+        raise RuntimeError(f"Infrastructure deploy script not found: {deploy_script}")
+
+    log("Deploying infrastructure containers (deploy_containers.sh)...")
+    returncode, stdout = await _run_cmd_async(
+        ["bash", str(deploy_script), "true"],
+        timeout=600,
+    )
+    if returncode != 0:
+        raise RuntimeError(f"Infrastructure deployment failed (exit {returncode}): {stdout[-2000:]}")
+    log("Infrastructure containers deployed")
+
+
+async def start_execution(
+    task_id: str,
+    session: SessionState,
+) -> ExecutionState:
+    """Spin up a container for ``task_id``, run preprocess, start the tool gateway,
+    and return an ExecutionState with the available tools.
+
+    On the first call in a session, also deploys shared infrastructure via
+    ``deploy_containers.sh`` (K8s cluster, email server, WooCommerce, etc.).
+    """
+    if not session.infra_deployed:
+        await _deploy_infrastructure()
+        session.infra_deployed = True
+
+    runtime = _get_container_runtime()
+    prefix = _get_instance_prefix()
+    image = _get_image_name()
+
+    task_source = TASKS_DIR / task_id
+    if not task_source.is_dir():
+        raise FileNotFoundError(f"Task not found: {task_id}")
+
+    exec_id = f"exec_{uuid.uuid4().hex[:8]}"
+    gateway_port = _allocate_port()
+    container_name = f"{prefix}toolathlon-v2-{task_id}-{exec_id[-8:]}"
+
+    output_folder = DUMPS_BASE / session.session_id / task_id / exec_id
+    output_folder.mkdir(parents=True, exist_ok=True)
+    log_dir = output_folder
+    output_folder_str = str(output_folder.resolve())
+
+    task_dir_arg = f"finalpool/{task_id}"
+
+    log(f"Starting execution {exec_id} for task {task_id} (port={gateway_port}, container={container_name})")
+
+    # Step 1: Start container
+    start_cmd = [
+        runtime, "run", "-d",
+        "--name", container_name,
+        "--network", "host",
+    ]
+
+    if runtime == "podman":
+        for sock_path in ["/run/podman/podman.sock", f"/run/user/{os.getuid()}/podman/podman.sock"]:
+            if os.path.exists(sock_path):
+                start_cmd += ["-v", f"{sock_path}:/run/podman/podman.sock"]
+                break
+        start_cmd += ["-e", "KIND_EXPERIMENTAL_PROVIDER=podman"]
+    elif runtime == "docker":
+        if os.path.exists("/var/run/docker.sock"):
+            start_cmd += ["-v", "/var/run/docker.sock:/var/run/docker.sock"]
+
+    start_cmd += [
+        "-v", f"{output_folder_str}:/workspace/dumps",
+        "-v", f"{output_folder_str}:/workspace/logs",
+        "-w", "/workspace",
+        image,
+        "sleep", "3600",
+    ]
+
+    result = _run_cmd(start_cmd)
+    if result.returncode != 0:
+        raise RuntimeError(f"Container start failed: {result.stderr}")
+
+    log(f"Container {container_name} started")
+
+    # Step 2: Wait for container to be ready
+    for _ in range(30):
+        check = _run_cmd([runtime, "exec", container_name, "echo", "ready"], timeout=10)
+        if check.returncode == 0:
+            break
+        await asyncio.sleep(1)
+    else:
+        raise RuntimeError(f"Container {container_name} not ready after 30s")
+
+    # Step 3: Copy project files
+    for item in FILES_TO_COPY:
+        src = PROJECT_ROOT / item
+        if not src.exists():
+            continue
+        if src.is_dir():
+            parent = str(Path(item).parent)
+            if parent != ".":
+                _run_cmd([runtime, "exec", container_name, "mkdir", "-p", f"/workspace/{parent}"])
+        _run_cmd([runtime, "cp", str(src), f"{container_name}:/workspace/{item}"])
+
+    # Copy task directory
+    _run_cmd([runtime, "exec", container_name, "mkdir", "-p", "/workspace/tasks/finalpool"])
+    _run_cmd([runtime, "cp", str(task_source), f"{container_name}:/workspace/tasks/finalpool/"])
+
+    # Step 3.5: Copy config files (gmail/calendar MCP auth)
+    copy_config_cmd = (
+        "for dir in ~/.gmail-mcp ~/.calendar-mcp; do "
+        "mkdir -p $dir && "
+        "cp ./configs/gcp-oauth.keys.json $dir/ 2>/dev/null; "
+        "cp ./configs/google_credentials.json $dir/credentials.json 2>/dev/null; "
+        "done"
+    )
+    _run_cmd([runtime, "exec", container_name, "bash", "-c", copy_config_cmd])
+
+    mcp_auth_src = PROJECT_ROOT / "configs" / ".mcp-auth"
+    if mcp_auth_src.is_dir():
+        _run_cmd([runtime, "exec", container_name, "mkdir", "-p", "/root/.mcp-auth"])
+        _run_cmd([runtime, "cp", f"{mcp_auth_src}/.", f"{container_name}:/root/.mcp-auth/"])
+
+    log(f"Files copied to container {container_name}")
+
+    # Step 4: Run preprocess
+    preprocess_cmd = (
+        f"uv run python -m scripts.decoupled.container_preprocess "
+        f"--eval_config {DEFAULT_EVAL_CONFIG} "
+        f"--task_dir {task_dir_arg} "
+        f"--max_steps_under_single_turn_mode {DEFAULT_MAX_STEP} "
+        f"--model_short_name {DEFAULT_MODEL_SHORT_NAME} "
+        f"--provider {DEFAULT_PROVIDER} "
+        f"--bundle_file /workspace/dumps/task_bundle.json "
+        f"--host_output_folder {output_folder_str} "
+        f"--debug"
+    )
+
+    exec_env = ["--env", "DOCKER_API_VERSION=1.44"]
+    returncode, stdout = await _run_cmd_async(
+        [runtime, "exec"] + exec_env + [container_name, "bash", "-c", preprocess_cmd],
+        timeout=300,
+    )
+
+    preprocess_log = log_dir / "preprocess.log"
+    preprocess_log.write_text(stdout, encoding="utf-8")
+
+    if returncode != 0:
+        raise RuntimeError(f"Preprocess failed (exit {returncode}). See {preprocess_log}")
+
+    log(f"Preprocess done for {task_id}")
+
+    # Step 5: Start gateway
+    gateway_cmd = (
+        f"nohup uv run python -m scripts.decoupled.container_tool_gateway "
+        f"--bundle_file /workspace/dumps/task_bundle.json "
+        f"--host 0.0.0.0 --port {gateway_port} --debug "
+        f"> /workspace/logs/gateway.log 2>&1 & echo $!"
+    )
+
+    result = _run_cmd(
+        [runtime, "exec"] + exec_env + [container_name, "bash", "-c", gateway_cmd]
+    )
+    gateway_pid = result.stdout.strip()
+    log(f"Gateway started (PID={gateway_pid}) on port {gateway_port}")
+
+    # Step 6: Wait for gateway health
+    gateway_url = f"http://127.0.0.1:{gateway_port}"
+
+    for i in range(GATEWAY_STARTUP_TIMEOUT):
+        try:
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                resp = await client.get(f"{gateway_url}/health")
+                if resp.status_code == 200:
+                    break
+        except Exception:
+            pass
+        await asyncio.sleep(1)
+    else:
+        raise RuntimeError(f"Gateway not ready on port {gateway_port} after {GATEWAY_STARTUP_TIMEOUT}s")
+
+    # Step 7: Query tool schemas
+    tools: List[ToolDef] = []
+    try:
+        async with httpx.AsyncClient(timeout=TOOL_QUERY_TIMEOUT) as client:
+            resp = await client.get(f"{gateway_url}/tools")
+            resp.raise_for_status()
+            data = resp.json()
+            for t in data.get("tools", []):
+                tools.append(ToolDef(
+                    name=t["name"],
+                    description=t.get("description", ""),
+                    parameters=t.get("parameters", {}),
+                ))
+    except Exception as e:
+        raise RuntimeError(f"Failed to query tools from gateway: {e}")
+
+    log(f"Execution {exec_id} ready with {len(tools)} tools")
+
+    execution = ExecutionState(
+        execution_id=exec_id,
+        task_id=task_id,
+        container_name=container_name,
+        gateway_port=gateway_port,
+        gateway_url=gateway_url,
+        output_folder=output_folder_str,
+        status="ready",
+        tools=tools,
+    )
+    session.executions[exec_id] = execution
+    return execution
+
+
+async def stop_execution(execution: ExecutionState) -> None:
+    """Force-remove the container and mark the execution as stopped."""
+    runtime = _get_container_runtime()
+    container = execution.container_name
+
+    log(f"Stopping execution {execution.execution_id} (container={container})")
+
+    try:
+        _run_cmd([runtime, "rm", "-f", container], timeout=15)
+    except Exception as e:
+        log(f"Warning: failed to remove container {container}: {e}")
+
+    execution.status = "stopped"
+
+
+async def run_eval(execution: ExecutionState) -> GradeResponse:
+    """Run ``container_eval.py`` inside the task container and parse results."""
+    runtime = _get_container_runtime()
+    container = execution.container_name
+
+    log(f"Running evaluation for execution {execution.execution_id}")
+
+    eval_cmd = (
+        "uv run python -m scripts.decoupled.container_eval "
+        "--bundle_file /workspace/dumps/task_bundle.json"
+    )
+    exec_env = ["--env", "DOCKER_API_VERSION=1.44"]
+
+    returncode, stdout = await _run_cmd_async(
+        [runtime, "exec"] + exec_env + [container, "bash", "-c", eval_cmd],
+        timeout=300,
+    )
+
+    eval_log_path = Path(execution.output_folder) / "eval.log"
+    eval_log_path.write_text(stdout, encoding="utf-8")
+
+    eval_res_path = Path(execution.output_folder) / "eval_res.json"
+    if not eval_res_path.exists():
+        return GradeResponse(
+            status="null",
+            score=float("nan"),
+            details="Evaluation did not produce results",
+            failure=f"eval exit code: {returncode}",
+        )
+
+    with open(eval_res_path, "r") as f:
+        eval_res = json.load(f)
+
+    pass_value = eval_res.get("pass")
+    if pass_value is True:
+        status = "pass"
+        score = 1.0
+    elif pass_value is False:
+        status = "fail"
+        score = 0.0
+    else:
+        status = "null"
+        score = float("nan")
+
+    execution.status = "graded"
+
+    return GradeResponse(
+        status=status,
+        score=score,
+        details=eval_res.get("details"),
+        failure=eval_res.get("failure"),
+    )
+
+
+async def cleanup_all_executions(session: SessionState) -> None:
+    """Stop all containers owned by this session (called on delete or idle reap)."""
+    runtime = _get_container_runtime()
+
+    for exec_id, execution in list(session.executions.items()):
+        if execution.status != "stopped":
+            try:
+                _run_cmd([runtime, "rm", "-f", execution.container_name], timeout=15)
+            except Exception as e:
+                log(f"Warning: cleanup failed for {execution.container_name}: {e}")
+            execution.status = "stopped"
+
+    log(f"Cleaned up {len(session.executions)} execution(s)")

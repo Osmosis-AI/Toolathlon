@@ -42,6 +42,10 @@ def log(msg):
 
 app = FastAPI(title="Toolathlon Eval Server")
 
+# Mount v2 API router
+from v2_api.router import router as v2_router
+app.include_router(v2_router, prefix="/v2")
+
 # ===== Global State =====
 current_job: Optional[Dict[str, Any]] = None
 # New structure: ip -> list of job records
@@ -643,13 +647,23 @@ async def root():
 @app.get("/check_server_status")
 async def check_server_status():
     """Check if server is busy (public endpoint)"""
+    from v2_api.session import current_session as v2_session
     if current_job:
         return {
             "busy": True,
+            "source": "v1",
             "job_id": current_job.get("job_id"),
             "mode": current_job.get("mode"),
             "model": current_job.get("model_name"),
             "started_at": current_job.get("started_at")
+        }
+    elif v2_session is not None:
+        return {
+            "busy": True,
+            "source": "v2",
+            "session_id": v2_session.session_id,
+            "model_name": v2_session.model_name,
+            "started_at": datetime.fromtimestamp(v2_session.created_at).isoformat(),
         }
     else:
         return {
@@ -704,14 +718,15 @@ async def submit_evaluation(request: Request, data: SubmitEvaluationRequest):
     if not allowed:
         raise HTTPException(status_code=429, detail=error_msg)
 
-    # Check if server is busy
-    if current_job is not None:
+    # Check if server is busy (v1 job or v2 session)
+    from v2_api.session import current_session as v2_session
+    if current_job is not None or v2_session is not None:
         raise HTTPException(
             status_code=503,
             detail={
                 "error": "Server is busy",
                 "message": "Server is currently processing another task. Please try again later.",
-                "current_job_started_at": current_job.get("started_at")
+                "current_job_started_at": current_job.get("started_at") if current_job else None,
             }
         )
 

@@ -374,6 +374,62 @@ class ContainerToolGateway:
             }
         )
 
+    async def handle_list_tools_rest(self, request: web.Request) -> web.Response:
+        tools = []
+        for tool_dict in self.registry.list_tools():
+            tools.append({
+                "name": tool_dict["name"],
+                "description": tool_dict.get("description", ""),
+                "parameters": tool_dict["inputSchema"],
+            })
+        return web.json_response({"tools": tools})
+
+    async def handle_call_tool_rest(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception as e:
+            return web.json_response(
+                {"result": f"Invalid JSON: {e}", "is_error": True}, status=400
+            )
+
+        tool_name = body.get("tool_name")
+        arguments = body.get("arguments", {})
+
+        if not tool_name or not isinstance(tool_name, str):
+            return web.json_response(
+                {"result": "tool_name is required", "is_error": True}, status=400
+            )
+        if not isinstance(arguments, dict):
+            return web.json_response(
+                {"result": "arguments must be an object", "is_error": True}, status=400
+            )
+
+        record = self.registry.get(tool_name)
+        if record is None:
+            return web.json_response(
+                {"result": f"Tool not found: {tool_name}", "is_error": True}, status=404
+            )
+
+        try:
+            if record.backend_type == "local":
+                result_text = "you have claimed the task is done!"
+                is_error = False
+            else:
+                raw_result = await self._remote_call(record, arguments)
+                content = raw_result.get("content", [])
+                result_text = "\n".join(
+                    item.get("text", str(item))
+                    for item in content
+                    if isinstance(item, dict)
+                )
+                is_error = raw_result.get("isError", False)
+        except Exception as e:
+            return web.json_response(
+                {"result": f"Tool call failed: {e}", "is_error": True}, status=500
+            )
+
+        return web.json_response({"result": result_text, "is_error": is_error})
+
     async def handle_sse_connection(self, request: web.Request) -> web.StreamResponse:
         session_id = str(uuid.uuid4())
         async with sse_response(request) as resp:
@@ -434,6 +490,8 @@ class ContainerToolGateway:
         app.router.add_get("/sse", self.handle_sse_connection)
         app.router.add_post("/messages", self.handle_json_rpc)
         app.router.add_post("/messages/", self.handle_json_rpc)
+        app.router.add_get("/tools", self.handle_list_tools_rest)
+        app.router.add_post("/call-tool", self.handle_call_tool_rest)
         app.on_startup.append(self.startup)
         app.on_cleanup.append(self.cleanup)
         return app
