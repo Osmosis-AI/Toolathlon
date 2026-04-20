@@ -1,6 +1,18 @@
 import unittest
 
-from scripts.decoupled.container_tool_gateway import GatewayCore, ToolRegistry
+from scripts.decoupled.container_tool_gateway import (
+    GatewayCore,
+    ToolRegistry,
+    execute_local_tool,
+)
+
+
+async def _default_local_caller(record, arguments):
+    result_text = await execute_local_tool(record.backend_name, arguments, ".")
+    return {
+        "content": [{"type": "text", "text": result_text}],
+        "isError": False,
+    }
 
 
 class ToolRegistryTests(unittest.TestCase):
@@ -37,7 +49,11 @@ class GatewayCoreTests(unittest.IsolatedAsyncioTestCase):
     async def test_initialize_and_tools_list(self) -> None:
         registry = ToolRegistry()
         registry.add_claim_done()
-        core = GatewayCore(registry=registry, remote_caller=self._unreachable_remote)
+        core = GatewayCore(
+            registry=registry,
+            remote_caller=self._unreachable_remote,
+            local_caller=_default_local_caller,
+        )
 
         init_resp = await core.handle_json_rpc(
             {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
@@ -54,7 +70,11 @@ class GatewayCoreTests(unittest.IsolatedAsyncioTestCase):
     async def test_local_claim_done_call(self) -> None:
         registry = ToolRegistry()
         registry.add_claim_done()
-        core = GatewayCore(registry=registry, remote_caller=self._unreachable_remote)
+        core = GatewayCore(
+            registry=registry,
+            remote_caller=self._unreachable_remote,
+            local_caller=_default_local_caller,
+        )
 
         call_resp = await core.handle_json_rpc(
             {
@@ -91,7 +111,11 @@ class GatewayCoreTests(unittest.IsolatedAsyncioTestCase):
                 "isError": False,
             }
 
-        core = GatewayCore(registry=registry, remote_caller=remote_caller)
+        core = GatewayCore(
+            registry=registry,
+            remote_caller=remote_caller,
+            local_caller=_default_local_caller,
+        )
         call_resp = await core.handle_json_rpc(
             {
                 "jsonrpc": "2.0",
@@ -108,7 +132,11 @@ class GatewayCoreTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unknown_method_returns_error(self) -> None:
         registry = ToolRegistry()
-        core = GatewayCore(registry=registry, remote_caller=self._unreachable_remote)
+        core = GatewayCore(
+            registry=registry,
+            remote_caller=self._unreachable_remote,
+            local_caller=_default_local_caller,
+        )
         response = await core.handle_json_rpc(
             {"jsonrpc": "2.0", "id": 10, "method": "unknown"}
         )

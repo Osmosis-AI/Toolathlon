@@ -25,7 +25,7 @@ from utils.openai_agents_monkey_patch.custom_run_impl import *
 from utils.openai_agents_monkey_patch.custom_mcp_util import *
 
 
-IGNORED_LOCAL_TOOLS = {"manage_context", "history", "handle_overlong_tool_outputs", "claim_done"}
+IGNORED_LOCAL_TOOLS = {"manage_context", "history", "handle_overlong_tool_outputs", "claim_done", "python_execute", "web_search", "sleep"}
 ANSI_RESET = "\033[0m"
 ANSI_BOLD = "\033[1m"
 ANSI_DIM = "\033[2m"

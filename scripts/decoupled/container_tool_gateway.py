@@ -1,6 +1,9 @@
 import argparse
 import asyncio
 import json
+import os
+import subprocess
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional
@@ -12,6 +15,151 @@ from utils.mcp.tool_servers import MCPServerManager, call_tool_with_retry
 
 JSONRPC_VERSION = "2.0"
 MCP_PROTOCOL_VERSION = "2024-11-05"
+
+IGNORED_LOCAL_TOOLS = {"manage_context", "history", "handle_overlong_tool_outputs"}
+
+LOCAL_TOOL_DEFS = {
+    "sleep": {
+        "name": "local-sleep",
+        "description": "use this tool to sleep for a while",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "seconds": {
+                    "type": "number",
+                    "description": "the number of seconds to sleep",
+                },
+            },
+            "required": ["seconds"],
+            "additionalProperties": False,
+        },
+    },
+    "python_execute": {
+        "name": "local-python-execute",
+        "description": "Execute Python code directly under the agent workspace, and returns stdout, stderr, return code, and execution time in a structured format.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "description": "Python code to execute (can be directly pasted into a .py file)",
+                },
+                "filename": {
+                    "type": "string",
+                    "description": "Filename for the Python file (including .py extension). If not provided, a random UUID will be used.",
+                },
+                "timeout": {
+                    "type": "number",
+                    "maximum": 120,
+                    "default": 30,
+                    "description": "Maximum execution time in seconds. Cannot exceed 120 seconds. Default is 30 seconds.",
+                },
+            },
+            "required": ["code"],
+            "additionalProperties": False,
+        },
+    },
+    "web_search": {
+        "name": "local-web_search",
+        "description": "Search the web using Google Serper API with concurrency control and retry mechanisms. Supports various Google search operators.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search query with optional Google search operators.",
+                },
+                "num_results": {
+                    "type": "integer",
+                    "description": "Number of results to return, default 10, max 50",
+                    "default": 10,
+                    "minimum": 1,
+                    "maximum": 50,
+                },
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+async def execute_local_tool(backend_name: str, arguments: Dict[str, Any], agent_workspace: str) -> str:
+    if backend_name == "local-claim_done":
+        return "you have claimed the task is done!"
+
+    if backend_name == "local-sleep":
+        seconds = arguments.get("seconds", 1)
+        time.sleep(seconds)
+        return f"has slept {seconds} seconds, wake up!"
+
+    if backend_name == "local-python-execute":
+        code = arguments.get("code", "")
+        filename = arguments.get("filename", f"{uuid.uuid4()}.py")
+        timeout = arguments.get("timeout", 30)
+        if timeout > 120:
+            timeout = 120
+        if not filename.endswith(".py"):
+            filename += ".py"
+
+        agent_workspace = os.path.abspath(agent_workspace)
+        tmp_dir = os.path.join(agent_workspace, ".python_tmp")
+        os.makedirs(tmp_dir, exist_ok=True)
+
+        file_path = os.path.join(tmp_dir, filename)
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(code)
+
+        start_time = time.time()
+        cmd = f"uv run --directory {agent_workspace} ./.python_tmp/{filename}"
+        try:
+            result = subprocess.run(
+                cmd, shell=True, capture_output=True, text=True,
+                encoding="utf-8", timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            execution_time = time.time() - start_time
+            return f"=== EXECUTION TIMEOUT ===\nExecution timed out after {timeout} seconds\nExecution time: {execution_time:.3f} seconds"
+
+        execution_time = time.time() - start_time
+        output_parts = []
+        if result.stdout:
+            output_parts.append("=== STDOUT ===")
+            output_parts.append(result.stdout.rstrip())
+        if result.stderr:
+            output_parts.append("=== STDERR ===")
+            output_parts.append(result.stderr.rstrip())
+        output_parts.append("=== EXECUTION INFO ===")
+        output_parts.append(f"Return code: {result.returncode}")
+        output_parts.append(f"Execution time: {execution_time:.3f} seconds")
+        output_parts.append(f"Timeout limit: {timeout} seconds")
+        if not result.stdout and not result.stderr:
+            output_parts.insert(0, "No console output produced.")
+        return "\n".join(output_parts)
+
+    if backend_name == "local-web_search":
+        query = arguments.get("query", "").strip()
+        num_results = min(max(arguments.get("num_results", 10), 1), 50)
+        if not query:
+            return "Error: Query parameter is required and cannot be empty"
+        from utils.aux_tools.web_search import search_google
+        results = search_google([query], num_results=num_results)
+        if not results:
+            return "No search results found."
+        formatted = []
+        for result in results:
+            if "error" in result:
+                formatted.append(f"Error: {result['error']}")
+            else:
+                formatted.append(
+                    f"Title: {result.get('title', 'No title')}\n"
+                    f"Link: {result.get('link', 'No link')}\n"
+                    f"Snippet: {result.get('snippet', 'No description')}\n"
+                    f"Sitelinks: {result.get('sitelinks', 'No sitelinks')}\n"
+                )
+        return "\n".join(formatted)
+
+    return f"Unknown local tool: {backend_name}"
 
 
 def read_json_file(path: str) -> dict:
@@ -143,20 +291,30 @@ class ToolRegistry:
                 server_name=server_name,
             )
 
-    def add_claim_done(self) -> None:
-        name = self._allocate_name("local-claim_done", "local", always_prefix=False)
+    def add_local_tool(self, tool_def: Dict[str, Any]) -> None:
+        backend_name = tool_def["name"]
+        name = self._allocate_name(backend_name, "local", always_prefix=False)
         self._records[name] = ToolRecord(
             exposed_name=name,
             backend_type="local",
-            backend_name="local-claim_done",
-            description="claim the task is done",
-            input_schema={
+            backend_name=backend_name,
+            description=tool_def.get("description", ""),
+            input_schema=tool_def.get("inputSchema", {
+                "type": "object", "properties": {},
+            }),
+            server_name=None,
+        )
+
+    def add_claim_done(self) -> None:
+        self.add_local_tool({
+            "name": "local-claim_done",
+            "description": "claim the task is done",
+            "inputSchema": {
                 "type": "object",
                 "properties": {},
                 "additionalProperties": False,
             },
-            server_name=None,
-        )
+        })
 
     def list_tools(self) -> List[Dict[str, Any]]:
         tools = []
@@ -183,9 +341,11 @@ class GatewayCore:
         self,
         registry: ToolRegistry,
         remote_caller: Callable[[ToolRecord, Dict[str, Any]], Awaitable[Dict[str, Any]]],
+        local_caller: Callable[[ToolRecord, Dict[str, Any]], Awaitable[Dict[str, Any]]],
     ) -> None:
         self.registry = registry
         self.remote_caller = remote_caller
+        self.local_caller = local_caller
 
     @staticmethod
     def _success(request_id: Any, result: Dict[str, Any]) -> Dict[str, Any]:
@@ -269,15 +429,7 @@ class GatewayCore:
 
             try:
                 if tool_record.backend_type == "local":
-                    result = {
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": "you have claimed the task is done!",
-                            }
-                        ],
-                        "isError": False,
-                    }
+                    result = await self.local_caller(tool_record, arguments)
                 else:
                     result = await self.remote_caller(tool_record, arguments)
             except Exception as e:
@@ -301,7 +453,8 @@ class ContainerToolGateway:
 
         self.bundle: Dict[str, Any] = {}
         self.registry = ToolRegistry()
-        self.core = GatewayCore(self.registry, self._remote_call)
+        self.agent_workspace: str = "."
+        self.core = GatewayCore(self.registry, self._remote_call, self._local_call)
 
         self.mcp_manager: Optional[MCPServerManager] = None
 
@@ -314,11 +467,11 @@ class ContainerToolGateway:
 
         needed_servers = self.bundle.get("needed_mcp_servers", []) or []
         mcp_config = self.bundle["eval_config"]["mcp"]
-        agent_workspace = self.bundle["container_paths"]["agent_workspace"]
+        self.agent_workspace = self.bundle["container_paths"]["agent_workspace"]
         local_token_key_session = self.bundle.get("local_token_key_session")
 
         self.mcp_manager = MCPServerManager(
-            agent_workspace=agent_workspace,
+            agent_workspace=self.agent_workspace,
             config_dir=mcp_config["server_config_path"],
             debug=self.debug,
             local_token_key_session=local_token_key_session,
@@ -331,6 +484,15 @@ class ContainerToolGateway:
             self.registry.add_remote_tools(server_name, tools)
 
         self.registry.add_claim_done()
+
+        needed_local_tools = self.bundle.get("needed_local_tools") or []
+        for tool_name in needed_local_tools:
+            if tool_name in IGNORED_LOCAL_TOOLS:
+                continue
+            if tool_name == "claim_done":
+                continue
+            if tool_name in LOCAL_TOOL_DEFS:
+                self.registry.add_local_tool(LOCAL_TOOL_DEFS[tool_name])
 
         if self.debug:
             print(f"[gateway] connected servers: {self.mcp_manager.get_connected_server_names()}")
@@ -361,6 +523,15 @@ class ContainerToolGateway:
             delay=0.5,
         )
         return _call_result_to_dict(result)
+
+    async def _local_call(self, tool_record: ToolRecord, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        result_text = await execute_local_tool(
+            tool_record.backend_name, arguments, self.agent_workspace,
+        )
+        return {
+            "content": [{"type": "text", "text": result_text}],
+            "isError": False,
+        }
 
     async def handle_health(self, request: web.Request) -> web.Response:
         connected = []
@@ -412,17 +583,16 @@ class ContainerToolGateway:
 
         try:
             if record.backend_type == "local":
-                result_text = "you have claimed the task is done!"
-                is_error = False
+                raw_result = await self._local_call(record, arguments)
             else:
                 raw_result = await self._remote_call(record, arguments)
-                content = raw_result.get("content", [])
-                result_text = "\n".join(
-                    item.get("text", str(item))
-                    for item in content
-                    if isinstance(item, dict)
-                )
-                is_error = raw_result.get("isError", False)
+            content = raw_result.get("content", [])
+            result_text = "\n".join(
+                item.get("text", str(item))
+                for item in content
+                if isinstance(item, dict)
+            )
+            is_error = raw_result.get("isError", False)
         except Exception as e:
             return web.json_response(
                 {"result": f"Tool call failed: {e}", "is_error": True}, status=500
