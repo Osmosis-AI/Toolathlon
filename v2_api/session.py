@@ -53,6 +53,11 @@ class SessionState:
 
 # If no v2 API request arrives for this long, the session is auto-reaped.
 IDLE_TIMEOUT_SECONDS = 60 * 60  # 60 minutes
+# Hard upper bound on session lifetime from creation.  Mirrors the v1 service's
+# outer job cap (``eval_server.TIMEOUT_SECONDS``) so a client that keeps the
+# session artificially busy with activity refreshes can't hold the server
+# forever.  An active client is still expected to finish well inside this.
+MAX_SESSION_DURATION_SECONDS = 24 * 60 * 60  # 24 hours
 REAPER_CHECK_INTERVAL = 60      # poll every 60 seconds
 
 # Module-level singleton — at most one session at a time.
@@ -119,11 +124,15 @@ async def delete_session(session_id: str) -> None:
 
 
 async def _idle_reaper() -> None:
-    """Background task that auto-deletes the session after 60 min of inactivity.
+    """Background task that auto-deletes the session on two conditions:
 
-    Every API request calls ``refresh_activity()`` which resets the timer.
-    If no requests arrive for ``IDLE_TIMEOUT_SECONDS``, all containers are
-    killed and the session is cleared, freeing the server for new work.
+    1. **Idle timeout** — no v2 API request for ``IDLE_TIMEOUT_SECONDS``
+       (60 min).  Every API request calls ``refresh_activity()`` which
+       resets this timer; catches abandoned / crashed clients.
+    2. **Max session duration** — total wall time since creation exceeds
+       ``MAX_SESSION_DURATION_SECONDS`` (24 h).  Activity refreshes cannot
+       extend this; catches runaway or stuck-in-loop clients.  Mirrors
+       v1's ``eval_server.TIMEOUT_SECONDS`` outer job cap.
     """
     global current_session, _reaper_task
     try:
@@ -133,13 +142,23 @@ async def _idle_reaper() -> None:
             if current_session is None:
                 return
 
-            idle_seconds = time.time() - current_session.last_activity_at
-            if idle_seconds > IDLE_TIMEOUT_SECONDS:
-                log(
-                    f"Session {current_session.session_id} idle for "
-                    f"{idle_seconds / 60:.1f} min, auto-reaping"
+            now = time.time()
+            idle_seconds = now - current_session.last_activity_at
+            age_seconds = now - current_session.created_at
+
+            reap_reason = None
+            if age_seconds > MAX_SESSION_DURATION_SECONDS:
+                reap_reason = (
+                    f"exceeded max session duration "
+                    f"({age_seconds / 3600:.1f}h > "
+                    f"{MAX_SESSION_DURATION_SECONDS / 3600:.1f}h)"
                 )
+            elif idle_seconds > IDLE_TIMEOUT_SECONDS:
+                reap_reason = f"idle for {idle_seconds / 60:.1f} min"
+
+            if reap_reason is not None:
                 session_id = current_session.session_id
+                log(f"Session {session_id} {reap_reason}, auto-reaping")
                 from .container_mgr import cleanup_all_executions
                 await cleanup_all_executions(current_session)
 

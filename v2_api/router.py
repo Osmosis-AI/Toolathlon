@@ -15,6 +15,7 @@ Every request that references a session refreshes its idle timer, preventing
 the 60-minute auto-reaper from cleaning it up.
 """
 
+import asyncio
 from datetime import datetime
 from typing import Optional
 
@@ -128,6 +129,11 @@ async def start_task(session_id: str, task_id: str):
         execution = await start_execution(task_id, session)
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=504,
+            detail="Task start timed out (preprocess or gateway boot exceeded internal limit)",
+        )
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
     return StartTaskResponse(

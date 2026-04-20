@@ -10,13 +10,13 @@
 # Used to isolate containers between different eval server instances
 # Container names will be: {instance_prefix}toolathlon-{task}-{timestamp}
 # Leave empty ("") to use default "toolathlon-" prefix
-instance_prefix: ""
+instance_prefix: "alpha-"
 
 # Instance suffix for container names
 # we suggest -inst-alpha, -inst-beta ... naming like this. 
 # Note that `_` and upper cases are not allowed!
 # Leave empty ("") for default container names
-instance_suffix: ""
+instance_suffix: "-inst-alpha"
 
 port_mappings:
   10001: 11001

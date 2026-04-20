@@ -56,7 +56,7 @@ ws_proxy_log_file = None  # Global log file handle
 transferred_tasks: Dict[str, set] = defaultdict(set)  # job_id -> set of transferred task names
 
 # ===== Configuration =====
-TIMEOUT_SECONDS = 240 * 60  # 240 minutes
+TIMEOUT_SECONDS = 600 * 60  # 600 minutes (10 hours)
 MAX_SUBMISSIONS_PER_IP = 3  # Max number of requests per IP
 RATE_LIMIT_HOURS = 24  # Time window for request count limit
 MAX_DURATION_MINUTES = 180  # Max cumulative duration in minutes (-1 for unlimited)
@@ -1516,6 +1516,29 @@ Output directory: {DUMPS_DIR}
     async def startup_event():
         asyncio.create_task(cleanup_old_files_periodically())
         log("[Server] Started background cleanup task (runs every 24 hours)")
+
+        # v2: reap any per-task containers left over from a previous server run
+        # that died before it could tear its session down.  Safe because no v2
+        # session exists yet; anything matching the pattern is an orphan.
+        try:
+            from v2_api.container_mgr import reconcile_orphan_containers
+            reconcile_orphan_containers()
+        except Exception as e:
+            log(f"[Server] v2 orphan reconciliation skipped: {e}")
+
+    # v2: clean up the active session on graceful shutdown (SIGTERM / SIGINT
+    # via uvicorn's signal handler).  Without this, Ctrl+C leaks the per-task
+    # containers of any in-flight session.
+    @app.on_event("shutdown")
+    async def shutdown_event():
+        try:
+            from v2_api.session import current_session, delete_session
+            if current_session is not None:
+                sid = current_session.session_id
+                log(f"[Server] Shutting down: tearing down active v2 session {sid}")
+                await delete_session(sid)
+        except Exception as e:
+            log(f"[Server] v2 shutdown cleanup failed: {e}")
 
     try:
         # Configure uvicorn logging with timestamps

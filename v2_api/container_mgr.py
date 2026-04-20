@@ -42,6 +42,13 @@ DEFAULT_PROVIDER = "unified"
 
 GATEWAY_STARTUP_TIMEOUT = 40  # seconds to wait for gateway /health
 TOOL_QUERY_TIMEOUT = 10       # seconds to wait for GET /tools
+# Per-task step cap for preprocess and eval.  v1 gives each task 40 min total
+# (``TIMEOUT=2400`` in ``scripts/run_parallel.sh``) covering preprocess + agent
+# loop + eval combined; the 4h ``TIMEOUT_SECONDS`` in eval_server.py is the
+# outer batch watchdog for the whole parallel run, not per-task.  In v2 the
+# agent loop lives on the client, so 30 min per step is comfortably inside
+# v1's per-task envelope and still a real guard against hung subprocesses.
+LONG_STEP_TIMEOUT = 30 * 60  # 30 minutes
 
 # Project files copied into every task container (mirrors run_single_decoupled.sh)
 FILES_TO_COPY = [
@@ -260,7 +267,7 @@ async def start_execution(
         exec_env = ["--env", "DOCKER_API_VERSION=1.44"]
         returncode, stdout = await _run_cmd_async(
             [runtime, "exec"] + exec_env + [container_name, "bash", "-c", preprocess_cmd],
-            timeout=300,
+            timeout=LONG_STEP_TIMEOUT,
         )
 
         preprocess_log = log_dir / "preprocess.log"
@@ -372,7 +379,7 @@ async def run_eval(execution: ExecutionState) -> GradeResponse:
 
     returncode, stdout = await _run_cmd_async(
         [runtime, "exec"] + exec_env + [container, "bash", "-c", eval_cmd],
-        timeout=300,
+        timeout=LONG_STEP_TIMEOUT,
     )
 
     eval_log_path = Path(execution.output_folder) / "eval.log"
@@ -424,3 +431,53 @@ async def cleanup_all_executions(session: SessionState) -> None:
             execution.status = "stopped"
 
     log(f"Cleaned up {len(session.executions)} execution(s)")
+
+
+def reconcile_orphan_containers() -> int:
+    """Reap any v2 per-task containers left over from a previous server run.
+
+    Called at server startup.  Because ``current_session`` is empty at boot,
+    any container matching the v2 naming pattern ``{prefix}toolathlon-v2-*``
+    is by definition an orphan (from a prior process that crashed or was
+    killed before it could tear its session down).  v1 per-task containers
+    use ``{prefix}toolathlon-{task}-{timestamp}`` (no ``v2-`` infix) and are
+    not matched by this filter — safe to run alongside a live v1 service.
+
+    Shared infrastructure (Canvas / Poste / WooCommerce / Kind clusters)
+    is intentionally left alone: it is expensive to redeploy and shared
+    across sessions by design.
+
+    Returns the number of containers removed.
+    """
+    runtime = _get_container_runtime()
+    prefix = _get_instance_prefix()
+    name_filter = f"{prefix}toolathlon-v2-"
+
+    try:
+        result = _run_cmd(
+            [runtime, "ps", "-a", "--filter", f"name={name_filter}", "--format", "{{.Names}}"],
+            timeout=15,
+        )
+    except Exception as e:
+        log(f"[startup] reconcile skipped: could not list containers ({e})")
+        return 0
+
+    if result.returncode != 0:
+        log(f"[startup] reconcile skipped: {runtime} ps failed: {result.stderr.strip()}")
+        return 0
+
+    names = [n for n in result.stdout.splitlines() if n.strip().startswith(name_filter)]
+    if not names:
+        log(f"[startup] reconcile: no v2 orphan containers matching '{name_filter}*'")
+        return 0
+
+    log(f"[startup] reconcile: removing {len(names)} v2 orphan container(s): {names}")
+    removed = 0
+    for name in names:
+        try:
+            _run_cmd([runtime, "rm", "-f", name], timeout=15)
+            removed += 1
+        except Exception as e:
+            log(f"[startup] reconcile: failed to remove {name}: {e}")
+    log(f"[startup] reconcile: removed {removed}/{len(names)}")
+    return removed
