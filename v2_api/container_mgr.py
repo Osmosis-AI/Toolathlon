@@ -195,133 +195,151 @@ async def start_execution(
 
     log(f"Container {container_name} started")
 
-    # Step 2: Wait for container to be ready
-    for _ in range(30):
-        check = _run_cmd([runtime, "exec", container_name, "echo", "ready"], timeout=10)
-        if check.returncode == 0:
-            break
-        await asyncio.sleep(1)
-    else:
-        raise RuntimeError(f"Container {container_name} not ready after 30s")
-
-    # Step 3: Copy project files
-    for item in FILES_TO_COPY:
-        src = PROJECT_ROOT / item
-        if not src.exists():
-            continue
-        if src.is_dir():
-            parent = str(Path(item).parent)
-            if parent != ".":
-                _run_cmd([runtime, "exec", container_name, "mkdir", "-p", f"/workspace/{parent}"])
-        _run_cmd([runtime, "cp", str(src), f"{container_name}:/workspace/{item}"])
-
-    # Copy task directory
-    _run_cmd([runtime, "exec", container_name, "mkdir", "-p", "/workspace/tasks/finalpool"])
-    _run_cmd([runtime, "cp", str(task_source), f"{container_name}:/workspace/tasks/finalpool/"])
-
-    # Step 3.5: Copy config files (gmail/calendar MCP auth)
-    copy_config_cmd = (
-        "for dir in ~/.gmail-mcp ~/.calendar-mcp; do "
-        "mkdir -p $dir && "
-        "cp ./configs/gcp-oauth.keys.json $dir/ 2>/dev/null; "
-        "cp ./configs/google_credentials.json $dir/credentials.json 2>/dev/null; "
-        "done"
-    )
-    _run_cmd([runtime, "exec", container_name, "bash", "-c", copy_config_cmd])
-
-    mcp_auth_src = PROJECT_ROOT / "configs" / ".mcp-auth"
-    if mcp_auth_src.is_dir():
-        _run_cmd([runtime, "exec", container_name, "mkdir", "-p", "/root/.mcp-auth"])
-        _run_cmd([runtime, "cp", f"{mcp_auth_src}/.", f"{container_name}:/root/.mcp-auth/"])
-
-    log(f"Files copied to container {container_name}")
-
-    # Step 4: Run preprocess
-    preprocess_cmd = (
-        f"uv run python -m scripts.decoupled.container_preprocess "
-        f"--eval_config {DEFAULT_EVAL_CONFIG} "
-        f"--task_dir {task_dir_arg} "
-        f"--max_steps_under_single_turn_mode {DEFAULT_MAX_STEP} "
-        f"--model_short_name {DEFAULT_MODEL_SHORT_NAME} "
-        f"--provider {DEFAULT_PROVIDER} "
-        f"--bundle_file /workspace/dumps/task_bundle.json "
-        f"--host_output_folder {output_folder_str} "
-        f"--debug"
-    )
-
-    exec_env = ["--env", "DOCKER_API_VERSION=1.44"]
-    returncode, stdout = await _run_cmd_async(
-        [runtime, "exec"] + exec_env + [container_name, "bash", "-c", preprocess_cmd],
-        timeout=300,
-    )
-
-    preprocess_log = log_dir / "preprocess.log"
-    preprocess_log.write_text(stdout, encoding="utf-8")
-
-    if returncode != 0:
-        raise RuntimeError(f"Preprocess failed (exit {returncode}). See {preprocess_log}")
-
-    log(f"Preprocess done for {task_id}")
-
-    # Step 5: Start gateway
-    gateway_cmd = (
-        f"nohup uv run python -m scripts.decoupled.container_tool_gateway "
-        f"--bundle_file /workspace/dumps/task_bundle.json "
-        f"--host 0.0.0.0 --port {gateway_port} --debug "
-        f"> /workspace/logs/gateway.log 2>&1 & echo $!"
-    )
-
-    result = _run_cmd(
-        [runtime, "exec"] + exec_env + [container_name, "bash", "-c", gateway_cmd]
-    )
-    gateway_pid = result.stdout.strip()
-    log(f"Gateway started (PID={gateway_pid}) on port {gateway_port}")
-
-    # Step 6: Wait for gateway health
-    gateway_url = f"http://127.0.0.1:{gateway_port}"
-
-    for i in range(GATEWAY_STARTUP_TIMEOUT):
-        try:
-            async with httpx.AsyncClient(timeout=3.0) as client:
-                resp = await client.get(f"{gateway_url}/health")
-                if resp.status_code == 200:
-                    break
-        except Exception:
-            pass
-        await asyncio.sleep(1)
-    else:
-        raise RuntimeError(f"Gateway not ready on port {gateway_port} after {GATEWAY_STARTUP_TIMEOUT}s")
-
-    # Step 7: Query tool schemas
-    tools: List[ToolDef] = []
+    # v1 parity: run_single_*.sh registers ``trap cleanup EXIT`` so the
+    # container is always removed on any exit path.  We emulate that by
+    # wrapping all subsequent steps in try/except and force-removing the
+    # container on any failure before re-raising.  Without this, a failed
+    # preprocess (or gateway boot, or tool query) leaves an orphan container
+    # running on the host with no entry in ``session.executions`` — the
+    # session-level cleanup can't find it.
     try:
-        async with httpx.AsyncClient(timeout=TOOL_QUERY_TIMEOUT) as client:
-            resp = await client.get(f"{gateway_url}/tools")
-            resp.raise_for_status()
-            data = resp.json()
-            for t in data.get("tools", []):
-                tools.append(ToolDef(
-                    name=t["name"],
-                    description=t.get("description", ""),
-                    parameters=t.get("parameters", {}),
-                ))
-    except Exception as e:
-        raise RuntimeError(f"Failed to query tools from gateway: {e}")
+        # Step 2: Wait for container to be ready
+        for _ in range(30):
+            check = _run_cmd([runtime, "exec", container_name, "echo", "ready"], timeout=10)
+            if check.returncode == 0:
+                break
+            await asyncio.sleep(1)
+        else:
+            raise RuntimeError(f"Container {container_name} not ready after 30s")
 
-    log(f"Execution {exec_id} ready with {len(tools)} tools")
+        # Step 3: Copy project files
+        for item in FILES_TO_COPY:
+            src = PROJECT_ROOT / item
+            if not src.exists():
+                continue
+            if src.is_dir():
+                parent = str(Path(item).parent)
+                if parent != ".":
+                    _run_cmd([runtime, "exec", container_name, "mkdir", "-p", f"/workspace/{parent}"])
+            _run_cmd([runtime, "cp", str(src), f"{container_name}:/workspace/{item}"])
 
-    execution = ExecutionState(
-        execution_id=exec_id,
-        task_id=task_id,
-        container_name=container_name,
-        gateway_port=gateway_port,
-        gateway_url=gateway_url,
-        output_folder=output_folder_str,
-        status="ready",
-        tools=tools,
-    )
-    session.executions[exec_id] = execution
-    return execution
+        # Copy task directory
+        _run_cmd([runtime, "exec", container_name, "mkdir", "-p", "/workspace/tasks/finalpool"])
+        _run_cmd([runtime, "cp", str(task_source), f"{container_name}:/workspace/tasks/finalpool/"])
+
+        # Step 3.5: Copy config files (gmail/calendar MCP auth)
+        copy_config_cmd = (
+            "for dir in ~/.gmail-mcp ~/.calendar-mcp; do "
+            "mkdir -p $dir && "
+            "cp ./configs/gcp-oauth.keys.json $dir/ 2>/dev/null; "
+            "cp ./configs/google_credentials.json $dir/credentials.json 2>/dev/null; "
+            "done"
+        )
+        _run_cmd([runtime, "exec", container_name, "bash", "-c", copy_config_cmd])
+
+        mcp_auth_src = PROJECT_ROOT / "configs" / ".mcp-auth"
+        if mcp_auth_src.is_dir():
+            _run_cmd([runtime, "exec", container_name, "mkdir", "-p", "/root/.mcp-auth"])
+            _run_cmd([runtime, "cp", f"{mcp_auth_src}/.", f"{container_name}:/root/.mcp-auth/"])
+
+        log(f"Files copied to container {container_name}")
+
+        # Step 4: Run preprocess
+        preprocess_cmd = (
+            f"uv run python -m scripts.decoupled.container_preprocess "
+            f"--eval_config {DEFAULT_EVAL_CONFIG} "
+            f"--task_dir {task_dir_arg} "
+            f"--max_steps_under_single_turn_mode {DEFAULT_MAX_STEP} "
+            f"--model_short_name {DEFAULT_MODEL_SHORT_NAME} "
+            f"--provider {DEFAULT_PROVIDER} "
+            f"--bundle_file /workspace/dumps/task_bundle.json "
+            f"--host_output_folder {output_folder_str} "
+            f"--debug"
+        )
+
+        exec_env = ["--env", "DOCKER_API_VERSION=1.44"]
+        returncode, stdout = await _run_cmd_async(
+            [runtime, "exec"] + exec_env + [container_name, "bash", "-c", preprocess_cmd],
+            timeout=300,
+        )
+
+        preprocess_log = log_dir / "preprocess.log"
+        preprocess_log.write_text(stdout, encoding="utf-8")
+
+        if returncode != 0:
+            raise RuntimeError(f"Preprocess failed (exit {returncode}). See {preprocess_log}")
+
+        log(f"Preprocess done for {task_id}")
+
+        # Step 5: Start gateway
+        gateway_cmd = (
+            f"nohup uv run python -m scripts.decoupled.container_tool_gateway "
+            f"--bundle_file /workspace/dumps/task_bundle.json "
+            f"--host 0.0.0.0 --port {gateway_port} --debug "
+            f"> /workspace/logs/gateway.log 2>&1 & echo $!"
+        )
+
+        result = _run_cmd(
+            [runtime, "exec"] + exec_env + [container_name, "bash", "-c", gateway_cmd]
+        )
+        gateway_pid = result.stdout.strip()
+        log(f"Gateway started (PID={gateway_pid}) on port {gateway_port}")
+
+        # Step 6: Wait for gateway health
+        gateway_url = f"http://127.0.0.1:{gateway_port}"
+
+        for i in range(GATEWAY_STARTUP_TIMEOUT):
+            try:
+                async with httpx.AsyncClient(timeout=3.0) as client:
+                    resp = await client.get(f"{gateway_url}/health")
+                    if resp.status_code == 200:
+                        break
+            except Exception:
+                pass
+            await asyncio.sleep(1)
+        else:
+            raise RuntimeError(f"Gateway not ready on port {gateway_port} after {GATEWAY_STARTUP_TIMEOUT}s")
+
+        # Step 7: Query tool schemas
+        tools: List[ToolDef] = []
+        try:
+            async with httpx.AsyncClient(timeout=TOOL_QUERY_TIMEOUT) as client:
+                resp = await client.get(f"{gateway_url}/tools")
+                resp.raise_for_status()
+                data = resp.json()
+                for t in data.get("tools", []):
+                    tools.append(ToolDef(
+                        name=t["name"],
+                        description=t.get("description", ""),
+                        parameters=t.get("parameters", {}),
+                    ))
+        except Exception as e:
+            raise RuntimeError(f"Failed to query tools from gateway: {e}")
+
+        log(f"Execution {exec_id} ready with {len(tools)} tools")
+
+        execution = ExecutionState(
+            execution_id=exec_id,
+            task_id=task_id,
+            container_name=container_name,
+            gateway_port=gateway_port,
+            gateway_url=gateway_url,
+            output_folder=output_folder_str,
+            status="ready",
+            tools=tools,
+        )
+        session.executions[exec_id] = execution
+        return execution
+    except BaseException:
+        # v1 ``trap cleanup EXIT`` equivalent: ensure the container never
+        # outlives a failed start.  Use BaseException so CancelledError /
+        # KeyboardInterrupt also trigger cleanup.
+        try:
+            _run_cmd([runtime, "rm", "-f", container_name], timeout=15)
+            log(f"Cleaned up container {container_name} after failed start")
+        except Exception as cleanup_exc:
+            log(f"Warning: leaked container {container_name} after failed start: {cleanup_exc}")
+        raise
 
 
 async def stop_execution(execution: ExecutionState) -> None:
