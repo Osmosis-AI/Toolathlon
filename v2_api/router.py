@@ -33,9 +33,9 @@ from .models import (
     TaskInfo,
     TaskListResponse,
 )
+from . import session as _session
 from .session import (
     create_session,
-    current_session,
     delete_session,
     get_session,
     refresh_activity,
@@ -66,14 +66,24 @@ def _require_execution(session, execution_id: str):
 
 @router.get("/health", response_model=HealthResponse)
 async def health_check():
-    session_info = SessionInfo(active=False)
-    if current_session is not None:
+    # ``active`` reflects cross-modal busy state — true if either a v2 session
+    # or a v1 job is occupying the server, since both block POST /v2/sessions.
+    # The session_id/model_name/started_at fields are populated only when v2
+    # specifically is the cause; clients can hit /check_server_status for v1
+    # job details.
+    import eval_server
+    v1_busy = eval_server.current_job is not None
+    v2_session = _session.current_session
+
+    if v2_session is not None:
         session_info = SessionInfo(
             active=True,
-            session_id=current_session.session_id,
-            model_name=current_session.model_name,
-            started_at=datetime.fromtimestamp(current_session.created_at).isoformat(),
+            session_id=v2_session.session_id,
+            model_name=v2_session.model_name,
+            started_at=datetime.fromtimestamp(v2_session.created_at).isoformat(),
         )
+    else:
+        session_info = SessionInfo(active=v1_busy)
     return HealthResponse(status="ok", version="2.0", session=session_info)
 
 

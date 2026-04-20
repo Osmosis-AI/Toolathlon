@@ -78,6 +78,14 @@ class GradeResponse(BaseModel):
 # ── Health check ─────────────────────────────────────────────────────
 
 class SessionInfo(BaseModel):
+    """Reported by ``GET /v2/health``.
+
+    ``active`` is true whenever the server is occupied — either by a v2
+    session or by a v1 job — since both block ``POST /v2/sessions``.  The
+    remaining fields are populated only when a v2 session is the cause; if
+    only a v1 job is running they stay ``None``.  Clients that need v1 job
+    details should call ``GET /check_server_status``.
+    """
     active: bool
     session_id: Optional[str] = None
     model_name: Optional[str] = None
