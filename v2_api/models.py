@@ -14,6 +14,7 @@ from pydantic import BaseModel
 
 class CreateSessionRequest(BaseModel):
     model_name: str  # informational label, not used server-side for routing
+    debug: bool = False  # skip deploy_containers.sh on first task start
 
 class CreateSessionResponse(BaseModel):
     session_id: str

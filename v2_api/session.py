@@ -78,7 +78,7 @@ def refresh_activity() -> None:
         current_session.last_activity_at = time.time()
 
 
-def create_session(model_name: str) -> SessionState:
+def create_session(model_name: str, debug: bool = False) -> SessionState:
     global current_session, _reaper_task
 
     if is_server_busy():
@@ -88,10 +88,11 @@ def create_session(model_name: str) -> SessionState:
     current_session = SessionState(
         session_id=session_id,
         model_name=model_name,
+        infra_deployed=debug,
     )
 
     _reaper_task = asyncio.create_task(_idle_reaper())
-    log(f"Session created: {session_id} (model: {model_name})")
+    log(f"Session created: {session_id} (model: {model_name}{', debug' if debug else ''})")
     return current_session
 
 

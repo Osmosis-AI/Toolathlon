@@ -40,7 +40,7 @@ The v2 API is co-hosted with the v1 server. Start `eval_server.py` as usual:
 python eval_server.py [port] [ws_port] [max_submissions] [max_workers] [max_duration_minutes]
 ```
 
-`max_submissions`, `max_workers`, `max_duration_minutes` are ignored by the v2 API.
+`ws_port`, `max_submissions`, `max_workers`, `max_duration_minutes` are ignored by the v2 API.
 
 v2 endpoints are available at `http://<host>:<port>/v2/...`.
 
@@ -61,6 +61,12 @@ curl -X POST $SERVER/v2/sessions \
   -H "Content-Type: application/json" \
   -d '{"model_name": "my-model-v1"}'
 # → {"session_id": "sess_abc123", "status": "created"}
+
+# Create a debug session (skips deploy_containers.sh on first task start —
+# useful for iterating on tasks that don't need Canvas/Poste/WooCommerce/K8s)
+curl -X POST $SERVER/v2/sessions \
+  -H "Content-Type: application/json" \
+  -d '{"model_name": "my-model-v1", "debug": true}'
 
 SID="sess_abc123"
 
@@ -103,7 +109,7 @@ All endpoints are under the `/v2` prefix.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/v2/sessions` | Create a new session. Body: `{"model_name": "..."}`. Returns 503 if server is busy (v1 job or another v2 session active). |
+| `POST` | `/v2/sessions` | Create a new session. Body: `{"model_name": "...", "debug": false}`. Set `debug: true` to skip `deploy_containers.sh` on the first task start (tasks that don't need shared infra will still work). Returns 503 if server is busy (v1 job or another v2 session active). |
 | `DELETE` | `/v2/sessions/{session_id}` | Delete session and stop all containers |
 
 ### Task Execution
@@ -154,6 +160,8 @@ Tasks within the same group should not have concurrent active executions. The cl
 ## Infrastructure Deployment
 
 On the first `start` call in a session, the server runs `global_preparation/deploy_containers.sh` to set up shared infrastructure (K8s cluster, Poste email server, WooCommerce, Canvas). This is a one-time cost per session, matching v1's behavior of deploying infrastructure once before running tasks.
+
+To skip this step — e.g. when iterating on tasks that don't touch shared infra — create the session with `"debug": true`. Tool calls that do require those containers will fail while debug mode is active.
 
 Override the container image via the `TOOLATHLON_V2_IMAGE` environment variable (default: `lockon0927/toolathlon-task-image:1016beta`).
 

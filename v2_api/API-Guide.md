@@ -104,11 +104,13 @@ POST /v2/sessions
 Content-Type: application/json
 
 {
-  "model_name": "gpt-5"
+  "model_name": "gpt-5",
+  "debug": false
 }
 ```
 
 - `model_name` (required, string): An informational label for logging. The server does not use this to route model calls — the client handles all model inference.
+- `debug` (optional, boolean, default `false`): When `true`, the server skips `deploy_containers.sh` on the first task start. Useful for iterating on tasks that don't need shared infrastructure (Canvas, Poste, WooCommerce, K8s). Tool calls that require those containers will fail while debug mode is active.
 
 **Response** `200 OK`:
 ```json

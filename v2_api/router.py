@@ -106,7 +106,7 @@ async def create_session_endpoint(req: CreateSessionRequest):
     from .session import is_server_busy
     if is_server_busy():
         raise HTTPException(status_code=503, detail="Server is busy with an existing session or v1 job")
-    session = create_session(req.model_name)
+    session = create_session(req.model_name, debug=req.debug)
     return CreateSessionResponse(session_id=session.session_id, status="created")
 
 
