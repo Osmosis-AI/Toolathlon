@@ -3,7 +3,7 @@
 The server supports exactly one active session at a time.  A session is
 created by a client, holds zero or more task *executions* (each backed by a
 Docker/Podman container), and is torn down either explicitly by the client
-or automatically after 60 minutes of inactivity.
+or automatically after 20 minutes of inactivity.
 
 Mutual exclusion with v1:  ``is_server_busy()`` checks both v1's
 ``current_job`` and v2's ``current_session``, so only one workload type
@@ -52,7 +52,7 @@ class SessionState:
 
 
 # If no v2 API request arrives for this long, the session is auto-reaped.
-IDLE_TIMEOUT_SECONDS = 60 * 60  # 60 minutes
+IDLE_TIMEOUT_SECONDS = 20 * 60  # 20 minutes
 # Hard upper bound on session lifetime from creation.  Mirrors the v1 service's
 # outer job cap (``eval_server.TIMEOUT_SECONDS``) so a client that keeps the
 # session artificially busy with activity refreshes can't hold the server
@@ -128,7 +128,7 @@ async def _idle_reaper() -> None:
     """Background task that auto-deletes the session on two conditions:
 
     1. **Idle timeout** — no v2 API request for ``IDLE_TIMEOUT_SECONDS``
-       (60 min).  Every API request calls ``refresh_activity()`` which
+       (20 min).  Every API request calls ``refresh_activity()`` which
        resets this timer; catches abandoned / crashed clients.
     2. **Max session duration** — total wall time since creation exceeds
        ``MAX_SESSION_DURATION_SECONDS`` (24 h).  Activity refreshes cannot

@@ -53,12 +53,14 @@ def load_task_catalog() -> List[TaskInfo]:
         description = _read_text_file(task_dir / "docs" / "task.md")
         system_prompt = _read_text_file(task_dir / "docs" / "agent_system_prompt.md")
         needed_mcp_servers = config.get("needed_mcp_servers", [])
+        needed_local_tools = config.get("needed_local_tools", [])
 
         tasks.append(TaskInfo(
             task_id=task_id,
             description=description,
             system_prompt=system_prompt,
             needed_mcp_servers=needed_mcp_servers,
+            needed_local_tools=needed_local_tools,
         ))
 
     return tasks
@@ -82,10 +84,12 @@ def get_task_info(task_id: str) -> Optional[TaskInfo]:
     description = _read_text_file(task_dir / "docs" / "task.md")
     system_prompt = _read_text_file(task_dir / "docs" / "agent_system_prompt.md")
     needed_mcp_servers = config.get("needed_mcp_servers", [])
+    needed_local_tools = config.get("needed_local_tools", [])
 
     return TaskInfo(
         task_id=task_id,
         description=description,
         system_prompt=system_prompt,
         needed_mcp_servers=needed_mcp_servers,
+        needed_local_tools=needed_local_tools,
     )

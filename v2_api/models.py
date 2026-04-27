@@ -43,6 +43,7 @@ class TaskInfo(BaseModel):
     description: str        # task prompt from docs/task.md
     system_prompt: str      # agent system prompt from docs/agent_system_prompt.md
     needed_mcp_servers: List[str]
+    needed_local_tools: List[str] = []  # in-container local tools (claim_done, python_execute, ...)
 
 class TaskListResponse(BaseModel):
     tasks: List[TaskInfo]

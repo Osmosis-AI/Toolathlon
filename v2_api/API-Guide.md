@@ -24,7 +24,7 @@ None. The v2 API does not require authentication.
 
 - The server supports **one session at a time** (shared with v1 — if a v1 job is running, v2 session creation will fail with 503).
 - Within a session, you can run **multiple task executions**, but beware of [task conflicts](#task-conflicts).
-- Sessions auto-expire after **60 minutes of inactivity** (no API calls). All containers are killed on expiry.
+- Sessions auto-expire after **20 minutes of inactivity** (no API calls). All containers are killed on expiry.
 
 ---
 
@@ -70,7 +70,8 @@ GET /v2/tasks
       "task_id": "ab-testing",
       "description": "You are a data analyst at a tech company...",
       "system_prompt": "You are an AI assistant helping with data analysis...",
-      "needed_mcp_servers": ["postgres-mcp", "filesystem-mcp"]
+      "needed_mcp_servers": ["postgres-mcp", "filesystem-mcp"],
+      "needed_local_tools": ["claim_done", "python_execute", "manage_context", "history", "handle_overlong_tool_outputs"]
     },
     ...
   ]
@@ -82,6 +83,7 @@ GET /v2/tasks
 - `description`: The task prompt to give to the agent model. This tells the model what to accomplish.
 - `system_prompt`: The system prompt to use when calling the model.
 - `needed_mcp_servers`: Informational — lists which MCP servers the task uses. Not needed for the client integration, but useful for understanding task requirements.
+- `needed_local_tools`: Informational — lists in-container local tools the task exposes (e.g. `claim_done`, `python_execute`, `web_search`, `manage_context`). Like `needed_mcp_servers`, the actual tool schemas come back from `start`.
 
 **Important**: This endpoint does NOT return tool schemas. Tools are task-specific and only available after calling `start` (which spins up the container and MCP servers).
 

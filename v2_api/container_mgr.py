@@ -120,6 +120,13 @@ async def _run_cmd_async(cmd: List[str], timeout: int = 300) -> tuple:
     return proc.returncode, stdout.decode("utf-8", errors="replace")
 
 
+# Serializes the first-call infrastructure deploy when many workers race into
+# start_execution() concurrently.  Without this, all of them see
+# session.infra_deployed == False before the first one finishes the (slow)
+# deploy_containers.sh and the script is run N times in parallel.
+_infra_deploy_lock = asyncio.Lock()
+
+
 async def _deploy_infrastructure() -> None:
     """Run deploy_containers.sh to start shared infrastructure (K8s, Poste, WooCommerce, Canvas)."""
     deploy_script = PROJECT_ROOT / "global_preparation" / "deploy_containers.sh"
@@ -147,8 +154,12 @@ async def start_execution(
     ``deploy_containers.sh`` (K8s cluster, email server, WooCommerce, etc.).
     """
     if not session.infra_deployed:
-        await _deploy_infrastructure()
-        session.infra_deployed = True
+        async with _infra_deploy_lock:
+            # Re-check inside the lock: a peer may have finished deploying
+            # while we were waiting for the lock.
+            if not session.infra_deployed:
+                await _deploy_infrastructure()
+                session.infra_deployed = True
 
     runtime = _get_container_runtime()
     prefix = _get_instance_prefix()
