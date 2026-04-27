@@ -101,8 +101,13 @@ async def run_eval(bundle_file: str, allow_resume: bool = False) -> Dict[str, An
             dump_line = remap_dump_line_paths_to_container(dump_line, bundle)
         else:
             # v2 path: no trajectory log (client drove the loop on the host).
-            # Rebuild the minimal dump_line from the bundle.
+            # Rebuild the minimal dump_line from the bundle, and persist it to
+            # ``log_file`` so per-task evaluation/main.py scripts that
+            # ``read_json(args.res_log_file)`` see a real file with the same
+            # ``config`` shape as v1 (same launch_time, paths, etc.).
             dump_line = synthesize_dump_line_from_bundle(bundle)
+            os.makedirs(os.path.dirname(log_file), exist_ok=True)
+            write_json_file(log_file, dump_line)
         eval_res = await TaskEvaluator.evaluate_one(dump_line)
         write_json_file(eval_file_path, eval_res)
 
