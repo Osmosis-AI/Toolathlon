@@ -71,7 +71,7 @@ GET /v2/tasks
       "description": "You are a data analyst at a tech company...",
       "system_prompt": "You are an AI assistant helping with data analysis...",
       "needed_mcp_servers": ["postgres-mcp", "filesystem-mcp"],
-      "needed_local_tools": ["claim_done", "python_execute", "manage_context", "history", "handle_overlong_tool_outputs"]
+      "needed_local_tools": ["claim_done", "python_execute"]
     },
     ...
   ]
@@ -83,7 +83,7 @@ GET /v2/tasks
 - `description`: The task prompt to give to the agent model. This tells the model what to accomplish.
 - `system_prompt`: The system prompt to use when calling the model.
 - `needed_mcp_servers`: Informational — lists which MCP servers the task uses. Not needed for the client integration, but useful for understanding task requirements.
-- `needed_local_tools`: Informational — lists in-container local tools the task exposes (e.g. `claim_done`, `python_execute`, `web_search`, `manage_context`). Like `needed_mcp_servers`, the actual tool schemas come back from `start`.
+- `needed_local_tools`: Informational — lists in-container local tools the task exposes. Possible values: `claim_done`, `python_execute`, `web_search`, `sleep`. Like `needed_mcp_servers`, the actual tool schemas come back from `start`. (Per-task; varies between tasks.)
 
 **Important**: This endpoint does NOT return tool schemas. Tools are task-specific and only available after calling `start` (which spins up the container and MCP servers).
 

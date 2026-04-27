@@ -16,6 +16,13 @@ from .models import TaskInfo
 
 TASKS_DIR = Path(__file__).parent.parent / "tasks" / "finalpool"
 
+# Names that appear in task_config.json#needed_local_tools but are NOT exposed
+# as callable tools by the container gateway — they're harness-internal
+# concepts (context management / history / output truncation).  Mirrors
+# IGNORED_LOCAL_TOOLS in scripts/decoupled/container_tool_gateway.py so the
+# catalog and the actual /tools list returned by `start` agree.
+_HARNESS_INTERNAL_LOCAL_TOOLS = {"manage_context", "history", "handle_overlong_tool_outputs"}
+
 
 def _read_text_file(path: Path) -> str:
     if not path.exists():
@@ -53,7 +60,10 @@ def load_task_catalog() -> List[TaskInfo]:
         description = _read_text_file(task_dir / "docs" / "task.md")
         system_prompt = _read_text_file(task_dir / "docs" / "agent_system_prompt.md")
         needed_mcp_servers = config.get("needed_mcp_servers", [])
-        needed_local_tools = config.get("needed_local_tools", [])
+        needed_local_tools = [
+            t for t in config.get("needed_local_tools", [])
+            if t not in _HARNESS_INTERNAL_LOCAL_TOOLS
+        ]
 
         tasks.append(TaskInfo(
             task_id=task_id,
@@ -84,7 +94,10 @@ def get_task_info(task_id: str) -> Optional[TaskInfo]:
     description = _read_text_file(task_dir / "docs" / "task.md")
     system_prompt = _read_text_file(task_dir / "docs" / "agent_system_prompt.md")
     needed_mcp_servers = config.get("needed_mcp_servers", [])
-    needed_local_tools = config.get("needed_local_tools", [])
+    needed_local_tools = [
+        t for t in config.get("needed_local_tools", [])
+        if t not in _HARNESS_INTERNAL_LOCAL_TOOLS
+    ]
 
     return TaskInfo(
         task_id=task_id,
