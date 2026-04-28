@@ -37,6 +37,7 @@ files_by_port:
     - deployment/poste/scripts/setup.sh
     - global_preparation/deploy_containers.sh
     - tasks/finalpool/apply-phd-email/email_config.json
+    - tasks/finalpool/apply-phd-email/files/receiver_config.json
     - tasks/finalpool/canvas-arrange-exam/emails_config.json
     - tasks/finalpool/canvas-art-manager/email_config.json
     - tasks/finalpool/canvas-art-manager/preprocess/main.py
