@@ -19,6 +19,7 @@ Supports both Docker and Podman (auto-detected from ``global_configs.py``).
 import asyncio
 import json
 import os
+import shutil
 import socket
 import subprocess
 import uuid
@@ -281,20 +282,20 @@ async def start_execution(
             timeout=LONG_STEP_TIMEOUT,
         )
 
-        preprocess_log = log_dir / "preprocess.log"
-        preprocess_log.write_text(stdout, encoding="utf-8")
-
         if returncode != 0:
-            raise RuntimeError(f"Preprocess failed (exit {returncode}). See {preprocess_log}")
+            # Surface the tail of preprocess stdout in the error so debugging
+            # doesn't depend on a persisted log file.
+            raise RuntimeError(f"Preprocess failed (exit {returncode}): {stdout[-2000:]}")
 
         log(f"Preprocess done for {task_id}")
 
-        # Step 5: Start gateway
+        # Step 5: Start gateway.  Discard stdout/stderr; container's docker
+        # logs still capture early-startup output if something explodes.
         gateway_cmd = (
             f"nohup uv run python -m scripts.decoupled.container_tool_gateway "
             f"--bundle_file /workspace/dumps/task_bundle.json "
             f"--host 0.0.0.0 --port {gateway_port} --debug "
-            f"> /workspace/logs/gateway.log 2>&1 & echo $!"
+            f"> /dev/null 2>&1 & echo $!"
         )
 
         result = _run_cmd(
@@ -361,7 +362,15 @@ async def start_execution(
 
 
 async def stop_execution(execution: ExecutionState) -> None:
-    """Force-remove the container and mark the execution as stopped."""
+    """Force-remove the container, drop its host-side output dir, and mark
+    the execution stopped.
+
+    The host-side ``execution.output_folder`` (under ``dumps_v2/...``) only
+    held transient artefacts (task_bundle.json, the synthesized traj_log,
+    eval_res.json once read into the GradeResponse).  Nothing is needed
+    after the container is gone, so wipe it to keep ``dumps_v2/`` from
+    growing without bound.
+    """
     runtime = _get_container_runtime()
     container = execution.container_name
 
@@ -371,6 +380,12 @@ async def stop_execution(execution: ExecutionState) -> None:
         _run_cmd([runtime, "rm", "-f", container], timeout=15)
     except Exception as e:
         log(f"Warning: failed to remove container {container}: {e}")
+
+    if execution.output_folder:
+        try:
+            shutil.rmtree(execution.output_folder, ignore_errors=True)
+        except Exception as e:
+            log(f"Warning: failed to remove output dir {execution.output_folder}: {e}")
 
     execution.status = "stopped"
 
@@ -393,16 +408,15 @@ async def run_eval(execution: ExecutionState) -> GradeResponse:
         timeout=LONG_STEP_TIMEOUT,
     )
 
-    eval_log_path = Path(execution.output_folder) / "eval.log"
-    eval_log_path.write_text(stdout, encoding="utf-8")
-
     eval_res_path = Path(execution.output_folder) / "eval_res.json"
     if not eval_res_path.exists():
+        # Include the tail of eval stdout so a missing eval_res.json is
+        # diagnosable without a persisted log file.
         return GradeResponse(
             status="null",
             score=float("nan"),
             details="Evaluation did not produce results",
-            failure=f"eval exit code: {returncode}",
+            failure=f"eval exit code: {returncode}; stdout tail: {stdout[-2000:]}",
         )
 
     with open(eval_res_path, "r") as f:
@@ -430,7 +444,8 @@ async def run_eval(execution: ExecutionState) -> GradeResponse:
 
 
 async def cleanup_all_executions(session: SessionState) -> None:
-    """Stop all containers owned by this session (called on delete or idle reap)."""
+    """Stop all containers owned by this session and wipe the session's
+    output dir tree (called on delete or idle reap)."""
     runtime = _get_container_runtime()
 
     for exec_id, execution in list(session.executions.items()):
@@ -440,6 +455,16 @@ async def cleanup_all_executions(session: SessionState) -> None:
             except Exception as e:
                 log(f"Warning: cleanup failed for {execution.container_name}: {e}")
             execution.status = "stopped"
+
+    # Remove the whole dumps_v2/{session_id}/ subtree in one shot.  Any
+    # per-execution dirs that stop_execution already wiped are no-ops; this
+    # also catches dirs from executions that never got a clean stop.
+    session_dir = DUMPS_BASE / session.session_id
+    if session_dir.exists():
+        try:
+            shutil.rmtree(session_dir, ignore_errors=True)
+        except Exception as e:
+            log(f"Warning: failed to remove session dump dir {session_dir}: {e}")
 
     log(f"Cleaned up {len(session.executions)} execution(s)")
 

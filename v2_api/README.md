@@ -186,9 +186,14 @@ v2_api/
 
 ## Output Directory
 
-v2 dumps are written to `dumps_v2/{session_id}/{task_id}/{execution_id}/` and include:
-- `task_bundle.json` — preprocess output (task config, MCP server info)
-- `preprocess.log` — preprocess stdout
-- `gateway.log` — tool gateway stdout
-- `eval.log` — evaluation stdout
-- `eval_res.json` — evaluation result (`{"pass": true/false, ...}`)
+While an execution is running, the server creates `dumps_v2/{session_id}/{task_id}/{execution_id}/` to hold transient artefacts that the in-container preprocess/eval tools need (`task_bundle.json`, the synthesized `traj_log.json`, and briefly `eval_res.json` until it's read into the `/grade` response).
+
+These dirs are **wiped automatically** as soon as they're no longer needed:
+
+- `DELETE /v2/sessions/{sid}/executions/{eid}` removes that execution's dir.
+- `DELETE /v2/sessions/{sid}` (and idle / max-duration auto-reaping) removes the entire `dumps_v2/{session_id}/` subtree.
+- Server shutdown tears down the active session, which triggers the same cleanup.
+
+Preprocess / gateway / eval stdout is **not persisted to disk** — preprocess and eval stdout tails surface in the HTTP error responses if a step fails; gateway stdout is discarded (early-startup output is still visible via `docker logs <container>`).
+
+Net result: `dumps_v2/` should be empty (or near-empty) when no session is active. Nothing accumulates.

@@ -478,12 +478,20 @@ httpx.delete(f"{BASE}/sessions/{session_id}")
 
 ## Output Directory
 
-Server-side logs and results are written to `dumps_v2/{session_id}/{task_id}/{execution_id}/`:
+While an execution is running, the server creates `dumps_v2/{session_id}/{task_id}/{execution_id}/` to hold transient artefacts that the in-container preprocess/eval tools need:
 
 | File | Description |
 |------|-------------|
-| `task_bundle.json` | Preprocess output — task config, MCP server info |
-| `preprocess.log` | Preprocess stdout/stderr |
-| `gateway.log` | Tool gateway stdout/stderr |
-| `eval.log` | Evaluation script stdout/stderr |
-| `eval_res.json` | Evaluation result: `{"pass": true/false, "details": "...", "failure": "..."}` |
+| `task_bundle.json` | Preprocess output — task config, MCP server info, container paths |
+| `traj_log.json` | Synthesized stub `{config, status}` so per-task evaluators that read `args.res_log_file` see a real file (no agent conversation here — the client owns that) |
+| `eval_res.json` | Evaluation result, briefly persisted by the in-container evaluator and then read into the `/grade` response |
+
+These dirs are **wiped automatically** as soon as they're no longer needed:
+
+- `DELETE /v2/sessions/{sid}/executions/{eid}` removes that execution's dir.
+- `DELETE /v2/sessions/{sid}` (and idle / max-duration auto-reaping) removes the entire `dumps_v2/{session_id}/` subtree.
+- Server shutdown tears down the active session, which triggers the same cleanup.
+
+Preprocess / gateway / eval stdout is **not persisted to disk**. If preprocess or eval fails, the tail of its stdout is included in the HTTP error response. Gateway stdout is discarded (early-startup output is still recoverable via `docker logs <container>` while the container exists).
+
+Net result: `dumps_v2/` is empty (or near-empty) whenever no session is active.
