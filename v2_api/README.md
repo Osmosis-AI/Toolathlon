@@ -154,8 +154,8 @@ Tasks within the same group should not have concurrent active executions. The cl
 ## Session Protection
 
 - **Mutual exclusion**: Only one workload (v1 job OR v2 session) can run at a time. Both v1 and v2 check each other's state before accepting work.
-- **Idle timeout**: If no v2 API request arrives for 20 minutes, the session is automatically reaped — all containers are killed and the server becomes available again.
-- **Every request refreshes the timer**: Any API call that references a session resets the 20-minute countdown.
+- **Idle timeout**: If no v2 API request arrives for 30 minutes, the session is automatically reaped — all containers are killed and the server becomes available again.
+- **Every request refreshes the timer**: Any API call that references a session resets the 30-minute countdown.
 
 ## Infrastructure Deployment
 

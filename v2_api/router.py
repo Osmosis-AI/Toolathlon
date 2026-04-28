@@ -12,7 +12,7 @@ Typical client workflow:
   7. DELETE /v2/sessions/{sid}                              → tear down session
 
 Every request that references a session refreshes its idle timer, preventing
-the 20-minute auto-reaper from cleaning it up.
+the 30-minute auto-reaper from cleaning it up.
 """
 
 import asyncio

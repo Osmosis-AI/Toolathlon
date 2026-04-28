@@ -24,7 +24,7 @@ None. The v2 API does not require authentication.
 
 - The server supports **one session at a time** (shared with v1 — if a v1 job is running, v2 session creation will fail with 503).
 - Within a session, you can run **multiple task executions**, but beware of [task conflicts](#task-conflicts).
-- Sessions auto-expire after **20 minutes of inactivity** (no API calls). All containers are killed on expiry.
+- Sessions auto-expire after **30 minutes of inactivity** (no API calls). All containers are killed on expiry.
 
 ---
 
