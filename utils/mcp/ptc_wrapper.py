@@ -391,7 +391,10 @@ class PTCWrapper:
         args = msg.get("args") or []
         kwargs = msg.get("kwargs") or {}
 
-        if tool_name == self.CODE_EXECUTION_TOOL:
+        # The agent sees the prefixed name ("ptc-programmatic_tool_call");
+        # accept the bare name too in case a caller strips the prefix.
+        prefixed = f"{PTCSyntheticServer.SERVER_NAME}-{self.CODE_EXECUTION_TOOL}"
+        if tool_name == self.CODE_EXECUTION_TOOL or tool_name == prefixed:
             await self._send({
                 "type": "tool_result", "id": req_id, "ok": False,
                 "error": "programmatic_tool_call cannot call itself recursively",
