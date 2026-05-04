@@ -1,0 +1,12 @@
+python eval_client.py run \
+  --mode private \
+  --base-url http://127.0.0.1:18025/v1 \
+  --model-name Qwen3-Coder-30B-A3B-Instruct \
+  --output-dir ./ptc-sft \
+  --server-host 47.253.47.223 \
+  --api-key sk-your-api-key \
+  --workers 10 \
+  --server-port 8082 \
+  --ws-proxy-port 8083 \
+  --task-list-file ./all_tasks.txt \
+  --override-output-dir
