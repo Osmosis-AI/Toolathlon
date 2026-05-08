@@ -18,7 +18,19 @@ class CreateSessionRequest(BaseModel):
 
 class CreateSessionResponse(BaseModel):
     session_id: str
-    status: str  # "created"
+    status: str  # "deploying" (deploy still running) or "ready" (debug=True bypass)
+
+
+class SessionStatusResponse(BaseModel):
+    """Returned by ``GET /v2/sessions/{sid}/status``.
+
+    Client-visible states are ``deploying`` and ``ready``.  If the session has
+    been auto-cleaned (deploy failed, idle reaper, DELETE), the status endpoint
+    returns 404 instead.
+    """
+    session_id: str
+    status: str  # "deploying" or "ready"
+    elapsed_s: float
 
 
 # ── Tool definitions ──────────────────────────────────────────────────
@@ -52,11 +64,30 @@ class TaskListResponse(BaseModel):
 # ── Task execution ───────────────────────────────────────────────────
 
 class StartTaskResponse(BaseModel):
-    """Returned by ``POST /start``.  Contains the execution handle and the
-    list of tools available for this task."""
+    """Returned by ``POST /start``.
+
+    The endpoint is async: it returns immediately with ``status="starting"``
+    and an empty ``tools`` list while container/preprocess/gateway run in the
+    background.  Clients should poll ``GET .../status`` until status flips to
+    ``ready``, at which point ``tools`` is populated with the task-specific
+    tool schemas.
+    """
     execution_id: str
-    status: str           # "ready"
-    tools: List[ToolDef]  # task-specific tools to feed to the model
+    status: str                              # "starting" or "ready"
+    tools: List[ToolDef] = []                # populated only when status == "ready"
+
+
+class ExecutionStatusResponse(BaseModel):
+    """Returned by ``GET /v2/sessions/{sid}/executions/{eid}/status``.
+
+    Client-visible states are ``starting`` and ``ready``.  If setup failed or
+    the execution was DELETE'd, the status endpoint returns 404 instead.
+    """
+    execution_id: str
+    status: str                              # "starting" or "ready"
+    phase: str                               # informational sub-state during "starting"
+    elapsed_s: float
+    tools: List[ToolDef] = []                # populated only when status == "ready"
 
 class CallToolRequest(BaseModel):
     tool_name: str                   # must match a name from StartTaskResponse.tools

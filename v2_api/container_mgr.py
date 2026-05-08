@@ -121,13 +121,6 @@ async def _run_cmd_async(cmd: List[str], timeout: int = 300) -> tuple:
     return proc.returncode, stdout.decode("utf-8", errors="replace")
 
 
-# Serializes the first-call infrastructure deploy when many workers race into
-# start_execution() concurrently.  Without this, all of them see
-# session.infra_deployed == False before the first one finishes the (slow)
-# deploy_containers.sh and the script is run N times in parallel.
-_infra_deploy_lock = asyncio.Lock()
-
-
 async def _deploy_infrastructure() -> None:
     """Run deploy_containers.sh to start shared infrastructure (K8s, Poste, WooCommerce, Canvas)."""
     deploy_script = PROJECT_ROOT / "global_preparation" / "deploy_containers.sh"
@@ -137,37 +130,37 @@ async def _deploy_infrastructure() -> None:
     log("Deploying infrastructure containers (deploy_containers.sh)...")
     returncode, stdout = await _run_cmd_async(
         ["bash", str(deploy_script), "true"],
-        timeout=600,
+        timeout=1800,
     )
     if returncode != 0:
         raise RuntimeError(f"Infrastructure deployment failed (exit {returncode}): {stdout[-2000:]}")
     log("Infrastructure containers deployed")
 
 
-async def start_execution(
+def start_execution(
     task_id: str,
     session: SessionState,
 ) -> ExecutionState:
-    """Spin up a container for ``task_id``, run preprocess, start the tool gateway,
-    and return an ExecutionState with the available tools.
+    """Allocate an execution slot and kick off setup as a background task.
 
-    On the first call in a session, also deploys shared infrastructure via
-    ``deploy_containers.sh`` (K8s cluster, email server, WooCommerce, etc.).
+    Returns immediately with a "starting" ExecutionState; the actual container
+    spin / file copy / preprocess / gateway boot runs in ``_run_setup`` as an
+    asyncio task.  Clients should poll the status endpoint until
+    ``setup_status == "ready"`` before calling tools or grade.
+
+    On setup failure (raised from ``_run_setup``), the entry is auto-removed
+    from ``session.executions`` and the container is force-removed; a
+    subsequent status poll returns 404.
+
+    Shared infrastructure (``deploy_containers.sh``) is deployed once during
+    session creation, not here — see ``router.create_session_endpoint``.
     """
-    if not session.infra_deployed:
-        async with _infra_deploy_lock:
-            # Re-check inside the lock: a peer may have finished deploying
-            # while we were waiting for the lock.
-            if not session.infra_deployed:
-                await _deploy_infrastructure()
-                session.infra_deployed = True
-
-    runtime = _get_container_runtime()
     prefix = _get_instance_prefix()
-    image = _get_image_name()
 
     task_source = TASKS_DIR / task_id
     if not task_source.is_dir():
+        # Synchronous 404 — the client gets a clean error before we burn any
+        # resources.  Everything from here on can fail asynchronously.
         raise FileNotFoundError(f"Task not found: {task_id}")
 
     exec_id = f"exec_{uuid.uuid4().hex[:8]}"
@@ -176,53 +169,83 @@ async def start_execution(
 
     output_folder = DUMPS_BASE / session.session_id / task_id / exec_id
     output_folder.mkdir(parents=True, exist_ok=True)
-    log_dir = output_folder
     output_folder_str = str(output_folder.resolve())
-
-    task_dir_arg = f"finalpool/{task_id}"
 
     log(f"Starting execution {exec_id} for task {task_id} (port={gateway_port}, container={container_name})")
 
-    # Step 1: Start container
-    start_cmd = [
-        runtime, "run", "-d",
-        "--name", container_name,
-        "--network", "host",
-    ]
+    execution = ExecutionState(
+        execution_id=exec_id,
+        task_id=task_id,
+        container_name=container_name,
+        gateway_port=gateway_port,
+        gateway_url=f"http://127.0.0.1:{gateway_port}",
+        output_folder=output_folder_str,
+        status="starting",
+        tools=[],
+        setup_status="starting",
+        setup_phase="container_start",
+    )
+    session.executions[exec_id] = execution
+    execution.setup_task = asyncio.create_task(_run_setup(execution, session, task_source))
+    return execution
 
-    if runtime == "podman":
-        for sock_path in ["/run/podman/podman.sock", f"/run/user/{os.getuid()}/podman/podman.sock"]:
-            if os.path.exists(sock_path):
-                start_cmd += ["-v", f"{sock_path}:/run/podman/podman.sock"]
-                break
-        start_cmd += ["-e", "KIND_EXPERIMENTAL_PROVIDER=podman"]
-    elif runtime == "docker":
-        if os.path.exists("/var/run/docker.sock"):
-            start_cmd += ["-v", "/var/run/docker.sock:/var/run/docker.sock"]
 
-    start_cmd += [
-        "-v", f"{output_folder_str}:/workspace/dumps",
-        "-v", f"{output_folder_str}:/workspace/logs",
-        "-w", "/workspace",
-        image,
-        "sleep", "3600",
-    ]
+async def _run_setup(
+    execution: ExecutionState,
+    session: SessionState,
+    task_source: Path,
+) -> None:
+    """Background work for ``start_execution``: container spin, file copy,
+    preprocess, gateway boot, tool query.
 
-    result = _run_cmd(start_cmd)
-    if result.returncode != 0:
-        raise RuntimeError(f"Container start failed: {result.stderr}")
+    Updates ``execution.setup_phase`` as it progresses.  On any exception
+    (including ``CancelledError``), force-removes the container, wipes the
+    output folder, and drops the entry from ``session.executions`` so the
+    client sees a clean 404 on its next status poll.
+    """
+    runtime = _get_container_runtime()
+    image = _get_image_name()
+    container_name = execution.container_name
+    gateway_port = execution.gateway_port
+    gateway_url = execution.gateway_url
+    output_folder_str = execution.output_folder
+    task_id = execution.task_id
+    exec_id = execution.execution_id
+    task_dir_arg = f"finalpool/{task_id}"
 
-    log(f"Container {container_name} started")
-
-    # v1 parity: run_single_*.sh registers ``trap cleanup EXIT`` so the
-    # container is always removed on any exit path.  We emulate that by
-    # wrapping all subsequent steps in try/except and force-removing the
-    # container on any failure before re-raising.  Without this, a failed
-    # preprocess (or gateway boot, or tool query) leaves an orphan container
-    # running on the host with no entry in ``session.executions`` — the
-    # session-level cleanup can't find it.
+    container_started = False
     try:
+        # Step 1: Start container
+        execution.setup_phase = "container_start"
+        start_cmd = [
+            runtime, "run", "-d",
+            "--name", container_name,
+            "--network", "host",
+        ]
+        if runtime == "podman":
+            for sock_path in ["/run/podman/podman.sock", f"/run/user/{os.getuid()}/podman/podman.sock"]:
+                if os.path.exists(sock_path):
+                    start_cmd += ["-v", f"{sock_path}:/run/podman/podman.sock"]
+                    break
+            start_cmd += ["-e", "KIND_EXPERIMENTAL_PROVIDER=podman"]
+        elif runtime == "docker":
+            if os.path.exists("/var/run/docker.sock"):
+                start_cmd += ["-v", "/var/run/docker.sock:/var/run/docker.sock"]
+        start_cmd += [
+            "-v", f"{output_folder_str}:/workspace/dumps",
+            "-v", f"{output_folder_str}:/workspace/logs",
+            "-w", "/workspace",
+            image,
+            "sleep", "3600",
+        ]
+        result = _run_cmd(start_cmd)
+        if result.returncode != 0:
+            raise RuntimeError(f"Container start failed: {result.stderr}")
+        container_started = True
+        log(f"Container {container_name} started")
+
         # Step 2: Wait for container to be ready
+        execution.setup_phase = "container_ready"
         for _ in range(30):
             check = _run_cmd([runtime, "exec", container_name, "echo", "ready"], timeout=10)
             if check.returncode == 0:
@@ -232,6 +255,7 @@ async def start_execution(
             raise RuntimeError(f"Container {container_name} not ready after 30s")
 
         # Step 3: Copy project files
+        execution.setup_phase = "files_copied"
         for item in FILES_TO_COPY:
             src = PROJECT_ROOT / item
             if not src.exists():
@@ -242,11 +266,9 @@ async def start_execution(
                     _run_cmd([runtime, "exec", container_name, "mkdir", "-p", f"/workspace/{parent}"])
             _run_cmd([runtime, "cp", str(src), f"{container_name}:/workspace/{item}"])
 
-        # Copy task directory
         _run_cmd([runtime, "exec", container_name, "mkdir", "-p", "/workspace/tasks/finalpool"])
         _run_cmd([runtime, "cp", str(task_source), f"{container_name}:/workspace/tasks/finalpool/"])
 
-        # Step 3.5: Copy config files (gmail/calendar MCP auth)
         copy_config_cmd = (
             "for dir in ~/.gmail-mcp ~/.calendar-mcp; do "
             "mkdir -p $dir && "
@@ -260,10 +282,10 @@ async def start_execution(
         if mcp_auth_src.is_dir():
             _run_cmd([runtime, "exec", container_name, "mkdir", "-p", "/root/.mcp-auth"])
             _run_cmd([runtime, "cp", f"{mcp_auth_src}/.", f"{container_name}:/root/.mcp-auth/"])
-
         log(f"Files copied to container {container_name}")
 
         # Step 4: Run preprocess
+        execution.setup_phase = "preprocess"
         preprocess_cmd = (
             f"uv run python -m scripts.decoupled.container_preprocess "
             f"--eval_config {DEFAULT_EVAL_CONFIG} "
@@ -275,29 +297,23 @@ async def start_execution(
             f"--host_output_folder {output_folder_str} "
             f"--debug"
         )
-
         exec_env = ["--env", "DOCKER_API_VERSION=1.44"]
         returncode, stdout = await _run_cmd_async(
             [runtime, "exec"] + exec_env + [container_name, "bash", "-c", preprocess_cmd],
             timeout=LONG_STEP_TIMEOUT,
         )
-
         if returncode != 0:
-            # Surface the tail of preprocess stdout in the error so debugging
-            # doesn't depend on a persisted log file.
             raise RuntimeError(f"Preprocess failed (exit {returncode}): {stdout[-2000:]}")
-
         log(f"Preprocess done for {task_id}")
 
-        # Step 5: Start gateway.  Discard stdout/stderr; container's docker
-        # logs still capture early-startup output if something explodes.
+        # Step 5: Start gateway
+        execution.setup_phase = "gateway_boot"
         gateway_cmd = (
             f"nohup uv run python -m scripts.decoupled.container_tool_gateway "
             f"--bundle_file /workspace/dumps/task_bundle.json "
             f"--host 0.0.0.0 --port {gateway_port} --debug "
             f"> /dev/null 2>&1 & echo $!"
         )
-
         result = _run_cmd(
             [runtime, "exec"] + exec_env + [container_name, "bash", "-c", gateway_cmd]
         )
@@ -305,8 +321,6 @@ async def start_execution(
         log(f"Gateway started (PID={gateway_pid}) on port {gateway_port}")
 
         # Step 6: Wait for gateway health
-        gateway_url = f"http://127.0.0.1:{gateway_port}"
-
         for i in range(GATEWAY_STARTUP_TIMEOUT):
             try:
                 async with httpx.AsyncClient(timeout=3.0) as client:
@@ -320,6 +334,7 @@ async def start_execution(
             raise RuntimeError(f"Gateway not ready on port {gateway_port} after {GATEWAY_STARTUP_TIMEOUT}s")
 
         # Step 7: Query tool schemas
+        execution.setup_phase = "tool_query"
         tools: List[ToolDef] = []
         try:
             async with httpx.AsyncClient(timeout=TOOL_QUERY_TIMEOUT) as client:
@@ -335,35 +350,56 @@ async def start_execution(
         except Exception as e:
             raise RuntimeError(f"Failed to query tools from gateway: {e}")
 
+        # Done — flip to ready
+        execution.tools = tools
+        execution.setup_phase = "ready"
+        execution.setup_status = "ready"
+        execution.status = "ready"
         log(f"Execution {exec_id} ready with {len(tools)} tools")
-
-        execution = ExecutionState(
-            execution_id=exec_id,
-            task_id=task_id,
-            container_name=container_name,
-            gateway_port=gateway_port,
-            gateway_url=gateway_url,
-            output_folder=output_folder_str,
-            status="ready",
-            tools=tools,
-        )
-        session.executions[exec_id] = execution
-        return execution
-    except BaseException:
-        # v1 ``trap cleanup EXIT`` equivalent: ensure the container never
-        # outlives a failed start.  Use BaseException so CancelledError /
-        # KeyboardInterrupt also trigger cleanup.
-        try:
-            _run_cmd([runtime, "rm", "-f", container_name], timeout=15)
-            log(f"Cleaned up container {container_name} after failed start")
-        except Exception as cleanup_exc:
-            log(f"Warning: leaked container {container_name} after failed start: {cleanup_exc}")
+    except asyncio.CancelledError:
+        log(f"Execution {exec_id} setup cancelled at phase={execution.setup_phase}")
+        await _autoclean_execution(execution, session, container_started)
         raise
+    except BaseException as e:
+        # Loud log so post-mortem is possible even though the API hides the
+        # failure (client just sees 404 on next status poll).
+        log(f"Execution {exec_id} setup FAILED at phase={execution.setup_phase}: {e!r}")
+        await _autoclean_execution(execution, session, container_started)
+
+
+async def _autoclean_execution(
+    execution: ExecutionState,
+    session: SessionState,
+    container_started: bool,
+) -> None:
+    """Auto-clean a failed/cancelled execution.
+
+    - Force-removes the container (if it was actually started)
+    - Wipes the host output folder
+    - Drops the entry from session.executions, so the next status poll 404s
+    """
+    runtime = _get_container_runtime()
+    if container_started:
+        try:
+            _run_cmd([runtime, "rm", "-f", execution.container_name], timeout=15)
+            log(f"Cleaned up container {execution.container_name} after failed setup")
+        except Exception as cleanup_exc:
+            log(f"Warning: leaked container {execution.container_name}: {cleanup_exc}")
+    if execution.output_folder:
+        try:
+            shutil.rmtree(execution.output_folder, ignore_errors=True)
+        except Exception:
+            pass
+    session.executions.pop(execution.execution_id, None)
 
 
 async def stop_execution(execution: ExecutionState) -> None:
     """Force-remove the container, drop its host-side output dir, and mark
     the execution stopped.
+
+    If the execution is still in setup (``setup_status == "starting"``), the
+    background setup task is cancelled first; its own auto-clean handler then
+    runs to completion before we proceed with the explicit teardown.
 
     The host-side ``execution.output_folder`` (under ``dumps_v2/...``) only
     held transient artefacts (task_bundle.json, the synthesized traj_log,
@@ -375,6 +411,16 @@ async def stop_execution(execution: ExecutionState) -> None:
     container = execution.container_name
 
     log(f"Stopping execution {execution.execution_id} (container={container})")
+
+    # Cancel in-flight setup if any.  Skip self-cancel guard isn't needed
+    # here — stop_execution is never called from inside its own setup task.
+    setup_task = execution.setup_task
+    if setup_task is not None and not setup_task.done():
+        setup_task.cancel()
+        try:
+            await setup_task
+        except (asyncio.CancelledError, Exception):
+            pass
 
     try:
         _run_cmd([runtime, "rm", "-f", container], timeout=15)

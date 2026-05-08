@@ -34,7 +34,7 @@ REQUIRED_PORTS=($CANVAS_HTTP_PORT $CANVAS_HTTPS_PORT $POSTE_WEB_PORT $POSTE_SMTP
 # Retry / readiness tunables
 # ---------------------------------------------------------------------------
 MAX_DEPLOY_ATTEMPTS=2          # how many times to (re)run the full setup
-READINESS_TIMEOUT_SECONDS=420  # 7 min: Canvas first-boot is the slow path
+READINESS_TIMEOUT_SECONDS=1800 # 30 min: matches the outer asyncio cap in _deploy_infrastructure
 PROBE_INTERVAL_SECONDS=5
 
 # ---------------------------------------------------------------------------

@@ -2,40 +2,51 @@
 
 All endpoints are mounted under ``/v2`` (prefix added in ``eval_server.py``).
 
-Typical client workflow:
-  1. POST   /v2/sessions                                   → create session
-  2. GET    /v2/tasks                                      → browse available tasks
-  3. POST   /v2/sessions/{sid}/tasks/{tid}/start            → start a task, get tools
-  4. POST   /v2/sessions/{sid}/executions/{eid}/call-tool   → call tools in a loop
-  5. POST   /v2/sessions/{sid}/executions/{eid}/grade       → evaluate results
-  6. DELETE /v2/sessions/{sid}/executions/{eid}             → stop the task container
-  7. DELETE /v2/sessions/{sid}                              → tear down session
+Typical client workflow (async resource pattern — each HTTP call is short):
+  1. POST   /v2/sessions                                              → create session, returns 202 + status="deploying"
+  2. GET    /v2/sessions/{sid}/status                                  → poll until status="ready"
+  3. GET    /v2/tasks                                                  → browse available tasks
+  4. POST   /v2/sessions/{sid}/tasks/{tid}/start                       → start a task, returns 202 + status="starting"
+  5. GET    /v2/sessions/{sid}/executions/{eid}/status                 → poll until status="ready", get tools
+  6. POST   /v2/sessions/{sid}/executions/{eid}/call-tool              → call tools in a loop
+  7. POST   /v2/sessions/{sid}/executions/{eid}/grade                  → evaluate results
+  8. DELETE /v2/sessions/{sid}/executions/{eid}                        → stop the task container
+  9. DELETE /v2/sessions/{sid}                                         → tear down session
+
+Failure semantics: when a deploy or per-task setup fails, the server logs
+loudly and auto-cleans the resource.  The status endpoint then returns 404
+on subsequent polls — the client treats 404 the same as "this resource never
+existed" and retries from scratch.
 
 Every request that references a session refreshes its idle timer, preventing
 the 30-minute auto-reaper from cleaning it up.
 """
 
 import asyncio
+import time
 from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 
-from .container_mgr import run_eval, start_execution, stop_execution
+from .container_mgr import _deploy_infrastructure, run_eval, start_execution, stop_execution
 from .models import (
     CallToolRequest,
     CallToolResponse,
     CreateSessionRequest,
     CreateSessionResponse,
+    ExecutionStatusResponse,
     GradeResponse,
     HealthResponse,
     SessionInfo,
+    SessionStatusResponse,
     StartTaskResponse,
     TaskInfo,
     TaskListResponse,
 )
 from . import session as _session
 from .session import (
+    autoclean_session_after_deploy_failure,
     create_session,
     delete_session,
     get_session,
@@ -101,13 +112,70 @@ async def get_task(task_id: str):
     return info
 
 
-@router.post("/sessions", response_model=CreateSessionResponse)
+async def _run_deploy(session) -> None:
+    """Background task that runs ``deploy_containers.sh`` for a freshly-created
+    session.  On success, flips ``session.deploy_status`` to ``ready``.  On
+    failure or cancellation, logs loudly and auto-cleans the session so the
+    client's next status poll returns 404 (per the no-failed-state design).
+    """
+    try:
+        await _deploy_infrastructure()
+        # Only mutate state if our session is still the active one — could
+        # have been DELETE'd or reaped while we were running.
+        if _session.current_session is session:
+            session.infra_deployed = True
+            session.deploy_status = "ready"
+            _session.log(f"Session {session.session_id} deploy complete (status=ready)")
+    except asyncio.CancelledError:
+        _session.log(f"Session {session.session_id} deploy cancelled")
+        raise
+    except BaseException as e:
+        _session.log(f"Session {session.session_id} deploy FAILED: {e!r}")
+        await autoclean_session_after_deploy_failure(session)
+
+
+@router.post("/sessions", response_model=CreateSessionResponse, status_code=202)
 async def create_session_endpoint(req: CreateSessionRequest):
+    """Create a session and start the infrastructure deploy in the background.
+
+    Returns immediately with ``status="deploying"`` (or ``status="ready"`` for
+    debug-mode sessions that skip deploy).  Clients poll
+    ``GET /v2/sessions/{sid}/status`` until status flips to ``ready``.  If the
+    deploy fails, the session is auto-cleaned and the next status poll returns
+    404 — the client retries from scratch.
+
+    The single-session invariant means concurrent ``POST /v2/sessions`` callers
+    immediately get 503 while a deploy is in flight, so we never run two
+    deploys concurrently on the same v2 host.
+    """
     from .session import is_server_busy
     if is_server_busy():
         raise HTTPException(status_code=503, detail="Server is busy with an existing session or v1 job")
+
     session = create_session(req.model_name, debug=req.debug)
-    return CreateSessionResponse(session_id=session.session_id, status="created")
+    if not session.infra_deployed:
+        # Spawn the deploy as a background task and return immediately.
+        session.deploy_task = asyncio.create_task(_run_deploy(session))
+    # Else: debug=True path — create_session already set deploy_status="ready".
+    return CreateSessionResponse(
+        session_id=session.session_id,
+        status=session.deploy_status,
+    )
+
+
+@router.get("/sessions/{session_id}/status", response_model=SessionStatusResponse)
+async def session_status_endpoint(session_id: str):
+    """Poll endpoint for session deploy progress.
+
+    Returns 404 if the session was never created, or was auto-cleaned (deploy
+    failure / idle reap) or DELETE'd.  Refreshes the idle timer on each call.
+    """
+    session = _require_session(session_id)
+    return SessionStatusResponse(
+        session_id=session.session_id,
+        status=session.deploy_status,
+        elapsed_s=time.time() - session.deploy_started_at,
+    )
 
 
 @router.delete("/sessions/{session_id}")
@@ -122,23 +190,54 @@ async def delete_session_endpoint(session_id: str):
 @router.post(
     "/sessions/{session_id}/tasks/{task_id}/start",
     response_model=StartTaskResponse,
+    status_code=202,
 )
 async def start_task(session_id: str, task_id: str):
+    """Start a task execution.
+
+    Returns immediately with ``status="starting"`` and an empty ``tools`` list
+    while container/preprocess/gateway boot run in the background.  Clients
+    poll ``GET .../executions/{eid}/status`` until status flips to ``ready``,
+    at which point ``tools`` is populated.
+
+    Refuses with 409 if the session is still deploying — deploy must complete
+    before tasks can start.
+    """
     session = _require_session(session_id)
+    if session.deploy_status != "ready":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Session not ready, status={session.deploy_status}",
+        )
     try:
-        execution = await start_execution(task_id, session)
+        execution = start_execution(task_id, session)
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    except asyncio.TimeoutError:
-        raise HTTPException(
-            status_code=504,
-            detail="Task start timed out (preprocess or gateway boot exceeded internal limit)",
-        )
-    except RuntimeError as e:
-        raise HTTPException(status_code=500, detail=str(e))
     return StartTaskResponse(
         execution_id=execution.execution_id,
-        status=execution.status,
+        status=execution.setup_status,
+        tools=execution.tools,
+    )
+
+
+@router.get(
+    "/sessions/{session_id}/executions/{execution_id}/status",
+    response_model=ExecutionStatusResponse,
+)
+async def execution_status_endpoint(session_id: str, execution_id: str):
+    """Poll endpoint for per-execution setup progress.
+
+    Returns 404 if the execution was never created, or was auto-cleaned
+    (setup failure) or DELETE'd.  ``tools`` is populated only when status is
+    ``ready``.  Refreshes the session's idle timer.
+    """
+    session = _require_session(session_id)
+    execution = _require_execution(session, execution_id)
+    return ExecutionStatusResponse(
+        execution_id=execution.execution_id,
+        status=execution.setup_status,
+        phase=execution.setup_phase,
+        elapsed_s=time.time() - execution.setup_started_at,
         tools=execution.tools,
     )
 
@@ -156,6 +255,11 @@ async def call_tool_endpoint(
     execution = _require_execution(session, execution_id)
     if execution.status == "stopped":
         raise HTTPException(status_code=400, detail="Execution is stopped")
+    if execution.setup_status != "ready":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Execution not ready, status={execution.setup_status}",
+        )
     return await call_tool(execution, req.tool_name, req.arguments)
 
 
@@ -168,6 +272,11 @@ async def grade_endpoint(session_id: str, execution_id: str):
     execution = _require_execution(session, execution_id)
     if execution.status == "stopped":
         raise HTTPException(status_code=400, detail="Execution is stopped")
+    if execution.setup_status != "ready":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Execution not ready, status={execution.setup_status}",
+        )
     try:
         return await run_eval(execution)
     except RuntimeError as e:
