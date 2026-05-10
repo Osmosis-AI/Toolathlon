@@ -55,13 +55,30 @@ case $operation in
     echo "Configuring Canvas domain to use port ${http_port}..."
     $podman_or_docker exec $container_name bash -c "sed -i 's/domain: \"localhost:3000\"/domain: \"localhost:${http_port}\"/' /opt/canvas/canvas-lms/config/domain.yml"
 
-    # Restart Canvas services inside container to apply config
-    echo "Restarting Canvas services to apply domain configuration..."
-    $podman_or_docker exec $container_name supervisorctl restart all 2>/dev/null || true
+    # Restart only the services that actually consume domain.yml (Rails web +
+    # delayed_job worker).  Postgres and Redis don't read domain.yml — and on
+    # a busy host, `restart all` can SIGKILL Postgres mid first-boot migration
+    # (supervisord's stop grace is 10s), leaving a stale postmaster.pid that
+    # blocks every subsequent restart with "pre-existing shared memory block".
+    echo "Restarting Canvas web services to apply domain configuration..."
+    $podman_or_docker exec $container_name supervisorctl restart canvas_web canvas_worker 2>/dev/null || true
 
     # Wait for services to restart
     echo "Waiting for Canvas services to fully restart..."
     sleep 10
+
+    # Belt-and-suspenders: if Postgres ended up FATAL anyway (e.g. a different
+    # process killed it mid-init, or this container was restarted hard before),
+    # clear the stale pid files inside the container's writable layer and ask
+    # supervisor to start it.  No-op when Postgres is healthy.  Scoped to this
+    # container only, so other instances' Canvas containers are untouched.
+    pg_state=$($podman_or_docker exec $container_name supervisorctl status postgres 2>/dev/null | awk '{print $2}')
+    if [ "$pg_state" = "FATAL" ]; then
+        echo "Postgres is FATAL; clearing stale pid files and restarting it..."
+        $podman_or_docker exec $container_name sh -c 'rm -f /var/lib/postgresql/9.3/main/postmaster.pid /var/run/postgresql/9.3-main.pid' 2>/dev/null || true
+        $podman_or_docker exec $container_name supervisorctl start postgres 2>/dev/null || true
+        sleep 5
+    fi
     
     # Start HTTPS proxy (using nohup)
     echo "Starting HTTPS proxy (port: $https_port)..."

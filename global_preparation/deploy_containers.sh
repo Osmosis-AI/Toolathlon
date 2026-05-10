@@ -120,13 +120,64 @@ wait_for_all_ready() {
 # ---------------------------------------------------------------------------
 # Run the actual setup steps.  Each component's setup.sh start is idempotent
 # (it stops any existing instance first), so calling this in a retry loop
-# is safe.
+# is safe.  The four components touch disjoint container names / ports /
+# networks, so they're also safe to run concurrently — each one's internal
+# stop-then-start cleanup still applies, just in parallel.  Per-component
+# output is captured to its own log file so a slow component (e.g. Canvas
+# first-boot) doesn't bury the others' progress; logs are replayed tagged
+# after all four finish.
 # ---------------------------------------------------------------------------
 run_setup() {
-    bash deployment/k8s/scripts/setup.sh
-    bash deployment/canvas/scripts/setup.sh # port $CANVAS_HTTP_PORT $CANVAS_HTTPS_PORT
-    bash deployment/poste/scripts/setup.sh start $poste_configure_dovecot # port $POSTE_WEB_PORT $POSTE_SMTP_PORT $POSTE_IMAP_PORT $POSTE_SUB_PORT
-    bash deployment/woocommerce/scripts/setup.sh start 81 20 # port $WOO_PORT
+    local logdir
+    logdir=$(mktemp -d -t toolathlon-deploy-XXXXXX)
+    echo "  parallel setup logs: $logdir  (tail -f \$logdir/<component>.log for live progress)"
+
+    (
+        bash deployment/k8s/scripts/setup.sh > "$logdir/k8s.log" 2>&1
+        echo $? > "$logdir/k8s.rc"
+    ) &
+    local pid_k8s=$!
+
+    (
+        bash deployment/canvas/scripts/setup.sh > "$logdir/canvas.log" 2>&1 # port $CANVAS_HTTP_PORT $CANVAS_HTTPS_PORT
+        echo $? > "$logdir/canvas.rc"
+    ) &
+    local pid_canvas=$!
+
+    (
+        bash deployment/poste/scripts/setup.sh start $poste_configure_dovecot > "$logdir/poste.log" 2>&1 # port $POSTE_WEB_PORT $POSTE_SMTP_PORT $POSTE_IMAP_PORT $POSTE_SUB_PORT
+        echo $? > "$logdir/poste.rc"
+    ) &
+    local pid_poste=$!
+
+    (
+        bash deployment/woocommerce/scripts/setup.sh start 81 20 > "$logdir/woo.log" 2>&1 # port $WOO_PORT
+        echo $? > "$logdir/woo.rc"
+    ) &
+    local pid_woo=$!
+
+    echo "  launched in parallel: k8s=$pid_k8s canvas=$pid_canvas poste=$pid_poste woo=$pid_woo"
+
+    wait "$pid_k8s" "$pid_canvas" "$pid_poste" "$pid_woo"
+
+    local c rc any_fail=0
+    for c in k8s canvas poste woo; do
+        rc=$(cat "$logdir/$c.rc" 2>/dev/null || echo "?")
+        [ "$rc" != "0" ] && any_fail=1
+        echo ""
+        echo "----- [$c] setup.sh exit=$rc -----"
+        sed "s|^|[$c] |" "$logdir/$c.log" 2>/dev/null || true
+    done
+
+    # Keep $logdir on disk for post-mortem (logs are tiny).  Each new deploy
+    # makes a fresh dir; old ones can be reaped manually if needed.
+    echo ""
+    echo "  parallel setup logs preserved at: $logdir"
+
+    # Propagate setup.sh failure: tells the retry loop to skip the 30-min
+    # readiness wait and either rerun setup or fail fast.  Without this,
+    # a `kind create` failure would stay invisible until readiness times out.
+    return $any_fail
 }
 
 # ---------------------------------------------------------------------------
@@ -163,17 +214,24 @@ while [ $attempt -le $MAX_DEPLOY_ATTEMPTS ]; do
     echo "============================================================================================="
     echo "Deploy attempt $attempt of $MAX_DEPLOY_ATTEMPTS (cluster=$KIND_CLUSTER_NAME)"
     echo "============================================================================================="
-    run_setup
 
-    echo ""
-    echo "Waiting up to ${READINESS_TIMEOUT_SECONDS}s for all services to be ready..."
-    if wait_for_all_ready $READINESS_TIMEOUT_SECONDS; then
-        echo "Deploy attempt $attempt succeeded."
-        break
+    # If any of the four setup.sh scripts already reported failure, skip the
+    # readiness wait — there's no point burning 30 min probing for a service
+    # we know didn't start.  Go straight to retry (or final-fail).
+    if run_setup; then
+        echo ""
+        echo "Waiting up to ${READINESS_TIMEOUT_SECONDS}s for all services to be ready..."
+        if wait_for_all_ready $READINESS_TIMEOUT_SECONDS; then
+            echo "Deploy attempt $attempt succeeded."
+            break
+        fi
+        retry_reason="services not ready in time"
+    else
+        retry_reason="one or more setup.sh scripts reported failure"
     fi
 
     if [ $attempt -ge $MAX_DEPLOY_ATTEMPTS ]; then
-        echo "ERROR: services not ready after $MAX_DEPLOY_ATTEMPTS attempts. Giving up."
+        echo "ERROR: $retry_reason after $MAX_DEPLOY_ATTEMPTS attempts. Giving up."
         echo "Exit time: $(date)"
         echo "Total time: $(($(date +%s) - start_time)) seconds"
         exit 1
@@ -181,7 +239,7 @@ while [ $attempt -le $MAX_DEPLOY_ATTEMPTS ]; do
 
     echo ""
     echo "============================================================================================="
-    echo "Services not ready in time on attempt $attempt — re-running deploy from the beginning."
+    echo "$retry_reason on attempt $attempt — re-running deploy from the beginning."
     echo "============================================================================================="
     attempt=$((attempt + 1))
 done
