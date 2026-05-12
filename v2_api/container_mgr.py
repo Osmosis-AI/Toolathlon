@@ -350,11 +350,16 @@ async def _run_setup(
         except Exception as e:
             raise RuntimeError(f"Failed to query tools from gateway: {e}")
 
-        # Done — flip to ready
+        # Done — flip to ready and start the container liveness watchdog so
+        # any out-of-band container death (crash / OOM / external rm) is
+        # reconciled into session.executions automatically.
         execution.tools = tools
         execution.setup_phase = "ready"
         execution.setup_status = "ready"
         execution.status = "ready"
+        execution.watchdog_task = asyncio.create_task(
+            _container_watchdog(execution, session)
+        )
         log(f"Execution {exec_id} ready with {len(tools)} tools")
     except asyncio.CancelledError:
         log(f"Execution {exec_id} setup cancelled at phase={execution.setup_phase}")
@@ -393,24 +398,91 @@ async def _autoclean_execution(
     session.executions.pop(execution.execution_id, None)
 
 
-async def stop_execution(execution: ExecutionState) -> None:
-    """Force-remove the container, drop its host-side output dir, and mark
-    the execution stopped.
+async def _container_watchdog(
+    execution: ExecutionState,
+    session: SessionState,
+) -> None:
+    """Block on ``docker wait <container>`` and reconcile state when it exits.
+
+    Spawned right after an execution flips to ``ready``.  ``docker wait``
+    blocks until the named container exits for *any* reason — clean exit,
+    crash, OOM kill, manual ``docker rm``, host docker daemon restart — at
+    which point we pop the entry from ``session.executions`` so subsequent
+    status / call-tool / grade requests return a clean 404 instead of trying
+    to reach a dead gateway.
+
+    Cancellation:  the orderly DELETE path (``stop_execution``) and the
+    session-wide cleanup paths cancel this task before they run their own
+    ``docker rm -f``, so the watchdog never races with the explicit teardown.
+    """
+    runtime = _get_container_runtime()
+    proc = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            runtime, "wait", execution.container_name,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        returncode = await proc.wait()
+    except asyncio.CancelledError:
+        if proc is not None and proc.returncode is None:
+            try:
+                proc.kill()
+                await proc.wait()
+            except Exception:
+                pass
+        raise
+    except Exception as e:
+        log(f"Watchdog for {execution.execution_id} crashed: {e!r}")
+        return
+
+    # docker wait returned — container is gone.  Reconcile.
+    if session.executions.pop(execution.execution_id, None) is not None:
+        log(
+            f"Execution {execution.execution_id} container exited "
+            f"unexpectedly (docker wait rc={returncode}), reconciled"
+        )
+        if execution.output_folder:
+            try:
+                shutil.rmtree(execution.output_folder, ignore_errors=True)
+            except Exception:
+                pass
+
+
+async def stop_execution(execution: ExecutionState, session: SessionState) -> None:
+    """Force-remove the container, drop its host-side output dir, and remove
+    the execution entry from ``session.executions``.
 
     If the execution is still in setup (``setup_status == "starting"``), the
     background setup task is cancelled first; its own auto-clean handler then
-    runs to completion before we proceed with the explicit teardown.
+    runs to completion before we proceed with the explicit teardown.  The
+    container watchdog is also cancelled up front so it doesn't race with us
+    on the docker rm.
 
     The host-side ``execution.output_folder`` (under ``dumps_v2/...``) only
     held transient artefacts (task_bundle.json, the synthesized traj_log,
     eval_res.json once read into the GradeResponse).  Nothing is needed
     after the container is gone, so wipe it to keep ``dumps_v2/`` from
     growing without bound.
+
+    After this returns, subsequent reads of the execution return 404, exactly
+    as if the execution had never existed — symmetric with what the watchdog
+    does on out-of-band container death.
     """
     runtime = _get_container_runtime()
     container = execution.container_name
 
     log(f"Stopping execution {execution.execution_id} (container={container})")
+
+    # Cancel the watchdog before docker rm -f so it doesn't observe our own
+    # teardown as an "unexpected" exit and double-reconcile.
+    watchdog_task = execution.watchdog_task
+    if watchdog_task is not None and not watchdog_task.done():
+        watchdog_task.cancel()
+        try:
+            await watchdog_task
+        except (asyncio.CancelledError, Exception):
+            pass
 
     # Cancel in-flight setup if any.  Skip self-cancel guard isn't needed
     # here — stop_execution is never called from inside its own setup task.
@@ -433,7 +505,7 @@ async def stop_execution(execution: ExecutionState) -> None:
         except Exception as e:
             log(f"Warning: failed to remove output dir {execution.output_folder}: {e}")
 
-    execution.status = "stopped"
+    session.executions.pop(execution.execution_id, None)
 
 
 async def run_eval(execution: ExecutionState) -> GradeResponse:

@@ -36,7 +36,7 @@ import uvicorn
 from fastapi import FastAPI
 
 from v2_api.container_mgr import reconcile_orphan_containers
-from v2_api.router import router as v2_router
+from v2_api.router import router as v2_router, install_v2_middleware
 import v2_api.session as v2_session_mod
 
 
@@ -76,6 +76,7 @@ _LOG_CONFIG = {
 
 app = FastAPI(title="Toolathlon v2 Sandbox API", version="2.0")
 app.include_router(v2_router, prefix="/v2")
+install_v2_middleware(app)
 
 
 @app.on_event("startup")

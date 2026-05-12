@@ -27,7 +27,8 @@ import time
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+import httpx
+from fastapi import APIRouter, FastAPI, HTTPException, Request
 
 from .container_mgr import _deploy_infrastructure, run_eval, start_execution, stop_execution
 from .models import (
@@ -59,13 +60,17 @@ router = APIRouter()
 
 
 def _require_session(session_id: str):
-    """Look up the session or raise 404.  Also refreshes the idle timer."""
+    """Look up the session or raise 404.
+
+    Does NOT refresh the idle timer — that is now done by
+    ``install_v2_middleware`` only on successful 2xx responses, so failing
+    requests (404, 409, 503) cannot keep a dead session alive forever by
+    repeatedly retrying.
+    """
     try:
-        session = get_session(session_id)
+        return get_session(session_id)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
-    refresh_activity()
-    return session
 
 
 def _require_execution(session, execution_id: str):
@@ -74,6 +79,59 @@ def _require_execution(session, execution_id: str):
     if execution is None:
         raise HTTPException(status_code=404, detail=f"Execution not found: {execution_id}")
     return execution
+
+
+def _reconcile_dead_execution(session, execution, reason: str) -> None:
+    """Lazy-invalidation path: discovered the execution's container is gone.
+
+    Cancels the watchdog (if it hasn't fired yet), wipes the host output dir,
+    and pops the entry from ``session.executions`` so subsequent reads return
+    a clean 404.  Symmetric with the watchdog's reconciliation, just triggered
+    by a failed call_tool / run_eval rather than by docker_wait returning.
+    """
+    import shutil
+    wt = execution.watchdog_task
+    if wt is not None and not wt.done():
+        wt.cancel()
+    if execution.output_folder:
+        try:
+            shutil.rmtree(execution.output_folder, ignore_errors=True)
+        except Exception:
+            pass
+    if session.executions.pop(execution.execution_id, None) is not None:
+        _session.log(
+            f"Execution {execution.execution_id} reconciled lazily ({reason})"
+        )
+
+
+def install_v2_middleware(app: FastAPI) -> None:
+    """Register the activity-refresh middleware on a FastAPI app.
+
+    The session's idle reaper countdown is reset only when a session-scoped
+    endpoint returns a 2xx response.  4xx and 5xx responses (including ones
+    against a dead/missing session or a lazily-invalidated execution) do not
+    refresh the timer — so a misbehaving client retrying against state that
+    no longer exists cannot keep a session artificially alive.  The 30-min
+    reaper then claims it on schedule.
+
+    Must be called by every launcher that mounts the v2 router (eval_server.py
+    for v1+v2 mode, eval_server_v2.py for v2-only mode).
+    """
+
+    @app.middleware("http")
+    async def _refresh_session_on_success(request: Request, call_next):
+        response = await call_next(request)
+        # Only refresh activity for *session-scoped* successful responses.
+        # Path filter uses the trailing slash so POST /v2/sessions (create)
+        # does not refresh — create_session already stamps last_activity_at.
+        # Top-level routes (/v2/health, /v2/tasks, /v2/tasks/{id}) are also
+        # excluded, so polling them cannot keep a session alive.
+        if (
+            200 <= response.status_code < 300
+            and request.url.path.startswith("/v2/sessions/")
+        ):
+            refresh_activity()
+        return response
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -253,14 +311,19 @@ async def call_tool_endpoint(
 ):
     session = _require_session(session_id)
     execution = _require_execution(session, execution_id)
-    if execution.status == "stopped":
-        raise HTTPException(status_code=400, detail="Execution is stopped")
     if execution.setup_status != "ready":
         raise HTTPException(
             status_code=409,
             detail=f"Execution not ready, status={execution.setup_status}",
         )
-    return await call_tool(execution, req.tool_name, req.arguments)
+    try:
+        return await call_tool(execution, req.tool_name, req.arguments)
+    except httpx.TransportError as e:
+        # Container's gateway is unreachable — race window before the
+        # watchdog finishes its reconcile, or a gateway process that died
+        # while the container is still alive (which the watchdog can't see).
+        _reconcile_dead_execution(session, execution, reason=f"call-tool transport error: {e!r}")
+        raise HTTPException(status_code=503, detail=f"Gateway unreachable: {e!r}")
 
 
 @router.post(
@@ -270,8 +333,6 @@ async def call_tool_endpoint(
 async def grade_endpoint(session_id: str, execution_id: str):
     session = _require_session(session_id)
     execution = _require_execution(session, execution_id)
-    if execution.status == "stopped":
-        raise HTTPException(status_code=400, detail="Execution is stopped")
     if execution.setup_status != "ready":
         raise HTTPException(
             status_code=409,
@@ -279,6 +340,9 @@ async def grade_endpoint(session_id: str, execution_id: str):
         )
     try:
         return await run_eval(execution)
+    except httpx.TransportError as e:
+        _reconcile_dead_execution(session, execution, reason=f"grade transport error: {e!r}")
+        raise HTTPException(status_code=503, detail=f"Gateway unreachable: {e!r}")
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -287,5 +351,5 @@ async def grade_endpoint(session_id: str, execution_id: str):
 async def stop_execution_endpoint(session_id: str, execution_id: str):
     session = _require_session(session_id)
     execution = _require_execution(session, execution_id)
-    await stop_execution(execution)
+    await stop_execution(execution, session)
     return {"status": "stopped"}

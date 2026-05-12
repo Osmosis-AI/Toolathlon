@@ -43,8 +43,9 @@ def log(msg):
 app = FastAPI(title="Toolathlon Eval Server")
 
 # Mount v2 API router
-from v2_api.router import router as v2_router
+from v2_api.router import router as v2_router, install_v2_middleware
 app.include_router(v2_router, prefix="/v2")
+install_v2_middleware(app)
 
 # ===== Global State =====
 current_job: Optional[Dict[str, Any]] = None

@@ -50,6 +50,13 @@ class ExecutionState:
     setup_phase: str = "container_start"    # informational sub-state
     setup_started_at: float = field(default_factory=time.time)
     setup_task: Optional[asyncio.Task] = None
+    # Container liveness watchdog — spawned when the execution flips to "ready".
+    # Blocks on `docker wait <container>` and removes the entry from
+    # session.executions when the container exits for any reason (clean exit,
+    # crash, OOM, external rm, host docker restart).  Keeps ExecutionState in
+    # sync with reality without polling.  Cancelled explicitly by stop_execution
+    # and the session-wide cleanup paths to prevent double-reconcile.
+    watchdog_task: Optional[asyncio.Task] = None
 
 
 @dataclass
@@ -160,11 +167,15 @@ async def delete_session(session_id: str) -> None:
     # cleanup_all_executions below will docker-rm their containers, which is
     # what actually frees host resources; the cancelled tasks will unwind on
     # their own shortly and skip their own auto-clean (the entry will already
-    # be gone from session.executions).
+    # be gone from session.executions).  Watchdog tasks are also cancelled
+    # so they don't race with cleanup_all_executions on `session.executions.pop`.
     for execution in list(session.executions.values()):
         st = execution.setup_task
         if st is not None and not st.done():
             st.cancel()
+        wt = execution.watchdog_task
+        if wt is not None and not wt.done():
+            wt.cancel()
 
     if _reaper_task is not None and not _reaper_task.done():
         _reaper_task.cancel()
@@ -254,10 +265,12 @@ async def _idle_reaper() -> None:
                 if current_session.deploy_task is not None and not current_session.deploy_task.done():
                     current_session.deploy_task.cancel()
 
-                # Same for any per-execution setup tasks.
+                # Same for any per-execution setup tasks and container watchdogs.
                 for execution in current_session.executions.values():
                     if execution.setup_task is not None and not execution.setup_task.done():
                         execution.setup_task.cancel()
+                    if execution.watchdog_task is not None and not execution.watchdog_task.done():
+                        execution.watchdog_task.cancel()
 
                 from .container_mgr import cleanup_all_executions
                 await cleanup_all_executions(current_session)
