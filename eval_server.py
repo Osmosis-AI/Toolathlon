@@ -40,7 +40,12 @@ def log(msg):
     utc_time = datetime.utcnow().strftime('%H:%M:%S.%f')[:-3]
     print(f"[{local_time}][UTC {utc_time}] {msg}", flush=True)
 
-app = FastAPI(title="Toolathlon Eval Server")
+app = FastAPI(
+    title="Toolathlon Eval Server",
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
 
 # ===== Global State =====
 current_job: Optional[Dict[str, Any]] = None
@@ -213,6 +218,12 @@ def anonymize_content(content: str, sensitive_values: Dict[str, str]) -> str:
             anonymized = anonymized.replace(value, replacement)
 
     return anonymized
+
+def anonymize_job_id(job_id: Optional[str]) -> Optional[str]:
+    """Anonymize job_id by showing only the stable prefix and last two chars."""
+    if not job_id or len(job_id) <= 6:
+        return job_id
+    return f"{job_id[:6]}{'*' * (len(job_id) - 8)}{job_id[-2:]}"
 
 def anonymize_file_content(file_path: Path, sensitive_values: Dict[str, str]) -> Optional[str]:
     """
@@ -646,7 +657,7 @@ async def check_server_status():
     if current_job:
         return {
             "busy": True,
-            "job_id": current_job.get("job_id"),
+            "job_id": anonymize_job_id(current_job.get("job_id")),
             "mode": current_job.get("mode"),
             "model": current_job.get("model_name"),
             "started_at": current_job.get("started_at")
@@ -1542,4 +1553,3 @@ Output directory: {DUMPS_DIR}
     except KeyboardInterrupt:
         cleanup_on_shutdown()
         print("\nExiting...")
-
