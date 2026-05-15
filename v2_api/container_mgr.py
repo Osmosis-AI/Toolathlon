@@ -236,7 +236,7 @@ async def _run_setup(
             "-v", f"{output_folder_str}:/workspace/logs",
             "-w", "/workspace",
             image,
-            "sleep", "3600",
+            "sleep", "5400",
         ]
         result = _run_cmd(start_cmd)
         if result.returncode != 0:
