@@ -25,6 +25,7 @@ from shared code (e.g. via the catalog) doesn't accidentally pull in v1.
 """
 
 import argparse
+import asyncio
 import logging
 import sys
 import types
@@ -86,6 +87,15 @@ async def _startup() -> None:
     reconcile_orphan_containers()
     # Start the per-execution idle/lifetime reaper.
     manager.start_reaper()
+    # Eagerly verify (or trigger background deploy of) shared infrastructure
+    # so the first /start doesn't pay the probe cost and any breakage gets
+    # the background ``deploy_containers.sh`` started before any client
+    # arrives.  Fire-and-forget: uvicorn must not be blocked from binding
+    # the port while a fresh deploy (potentially minutes) runs — clients
+    # that arrive in the meantime see deploy_status="unknown"/"checking"
+    # and bounce with a fast 503 + retry_after_s, exactly like the
+    # mid-repair case.
+    asyncio.create_task(manager.ensure_shared_infra_ready(trigger_repair=True))
 
 
 @app.on_event("shutdown")
