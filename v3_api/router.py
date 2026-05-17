@@ -326,12 +326,46 @@ async def grade_endpoint(execution_id: str):
     Always tears down the container and releases locks before returning,
     even if grading raises.  After this returns, subsequent reads of the
     execution return 404.
+
+    Race handling: the watchdog (``docker wait <container>``) and the
+    lifetime reaper can both reconcile an execution between admission and
+    grade.  To avoid returning a null/incomplete grade when this happens,
+    we cancel the watchdog up front and then re-check that the execution
+    is still in manager state.  If it vanished (container's sleep 5400
+    fired, or out-of-band ``docker rm`` happened, or the reaper claimed
+    it), we surface 404 so the client retries from ``/start`` instead of
+    treating the empty trajectory as a model failure.
     """
     ex = _require_execution(execution_id)
     if ex.setup_status != "ready" or ex.status != "ready":
         raise HTTPException(
             status_code=409,
             detail=f"Execution not ready, status={ex.status} setup_status={ex.setup_status}",
+        )
+
+    # Cancel the watchdog up front so it can't reconcile state under us
+    # while ``run_eval`` is executing inside the container.  Wait for it
+    # to actually unwind (it kills its ``docker wait`` subprocess on
+    # cancel) so we know it's done before we read manager state.
+    wt = ex.watchdog_task
+    if wt is not None and not wt.done():
+        wt.cancel()
+        try:
+            await wt
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    # If the watchdog (or the reaper) had already fired in the window
+    # between ``_require_execution`` and now, the execution is no longer
+    # in manager state.  Return 404 — clients treat that the same as
+    # "execution never existed" and retry the whole element.
+    if manager.get(execution_id) is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Execution {execution_id} vanished before grade "
+                f"(container exited or was reaped)"
+            ),
         )
 
     ex.status = "grading"
@@ -347,10 +381,13 @@ async def grade_endpoint(execution_id: str):
             failure=f"grade raised: {e!r}",
         )
 
-    # Always converge through manager cleanup — releases locks + tears down.
-    for t in (ex.setup_task, ex.watchdog_task):
-        if t is not None and not t.done():
-            t.cancel()
+    # Setup task should be done long before we got here (we gate on
+    # setup_status == "ready"), but cancel defensively so a stray pending
+    # task doesn't linger past cleanup.
+    st = ex.setup_task
+    if st is not None and not st.done():
+        st.cancel()
+
     await manager.cleanup_execution(ex, reason="grade")
 
     if grade_error is not None and isinstance(grade_error, RuntimeError):

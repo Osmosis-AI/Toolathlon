@@ -5,9 +5,16 @@ with endpoint-local capacity and conflict-group locking.  See
 ``v3_service_implementation_plan.md`` for the design.
 
 Usage:
-    uv run eval_server_v3.py [port]
+    uv run eval_server_v3.py [port] [--max-actors N] [--idle-timeout-seconds S]
 
-Default port is 8089.
+Examples:
+    uv run eval_server_v3.py                        # port 8089, defaults
+    uv run eval_server_v3.py 9000                   # port 9000, defaults
+    uv run eval_server_v3.py 9000 --max-actors 10   # cap at 10 concurrent tasks
+    uv run eval_server_v3.py --idle-timeout-seconds 600   # 10-min idle reap
+
+CLI flags override the corresponding env-var defaults
+(TOOLATHLON_V3_MAX_ACTIVE_EXECUTIONS, TOOLATHLON_V3_IDLE_TIMEOUT_SECONDS).
 
 Notes
 -----
@@ -17,6 +24,7 @@ ports.  Stub the ``eval_server`` module early so any transitive import
 from shared code (e.g. via the catalog) doesn't accidentally pull in v1.
 """
 
+import argparse
 import logging
 import sys
 import types
@@ -90,10 +98,57 @@ async def _shutdown() -> None:
         print(f"[eval_server_v3] shutdown error: {e!r}", flush=True)
 
 
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="eval_server_v3.py",
+        description="Toolathlon v3 sandbox API launcher.",
+    )
+    parser.add_argument(
+        "port",
+        nargs="?",
+        type=int,
+        default=8089,
+        help="Port to bind (default: 8089).",
+    )
+    # Defaults come from the manager, which already incorporates env vars
+    # (TOOLATHLON_V3_MAX_ACTIVE_EXECUTIONS / TOOLATHLON_V3_IDLE_TIMEOUT_SECONDS).
+    # CLI flags override env-var defaults.
+    parser.add_argument(
+        "--max-actors",
+        type=int,
+        default=manager.max_active_executions,
+        metavar="N",
+        help=(
+            "Maximum number of concurrent task executions admitted on this "
+            "endpoint (default: %(default)s)."
+        ),
+    )
+    parser.add_argument(
+        "--idle-timeout-seconds",
+        type=int,
+        default=manager.idle_timeout_seconds,
+        metavar="S",
+        help=(
+            "Seconds an execution may go without client activity before the "
+            "reaper releases it (default: %(default)s)."
+        ),
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8089
-    print(f"[eval_server_v3] starting v3-only server on http://0.0.0.0:{port}/v3/...", flush=True)
-    uvicorn.run(app, host="0.0.0.0", port=port, log_config=_LOG_CONFIG)
+    args = _parse_args()
+
+    # Apply CLI overrides before the reaper / setup tasks are spawned.
+    manager.max_active_executions = args.max_actors
+    manager.idle_timeout_seconds = args.idle_timeout_seconds
+
+    print(
+        f"[eval_server_v3] starting on http://0.0.0.0:{args.port}/v3/ "
+        f"(max_actors={args.max_actors}, idle_timeout_seconds={args.idle_timeout_seconds})",
+        flush=True,
+    )
+    uvicorn.run(app, host="0.0.0.0", port=args.port, log_config=_LOG_CONFIG)
 
 
 if __name__ == "__main__":

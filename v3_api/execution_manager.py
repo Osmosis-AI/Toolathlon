@@ -177,7 +177,11 @@ class ExecutionManager:
         self.lock_owner_by_key: Dict[str, str] = {}
         self.manager_lock = asyncio.Lock()
         self.infra_lock = asyncio.Lock()
+        # Tunables that the launcher may override before the reaper starts.
+        # The module-level constants serve only as default values (resolved
+        # from env vars at import time).
         self.max_active_executions = MAX_ACTIVE_EXECUTIONS
+        self.idle_timeout_seconds = IDLE_TIMEOUT_SECONDS
         self.reaper_task: Optional[asyncio.Task] = None
         # deploy status: "unknown" | "checking" | "repairing" | "ready" | "failed" | "disabled_debug"
         self.deploy_status: str = "disabled_debug" if SKIP_DEPLOY else "unknown"
@@ -192,9 +196,10 @@ class ExecutionManager:
             self.reaper_task = asyncio.create_task(self._reaper_loop())
 
     async def shutdown(self) -> None:
-        """Cancel reaper + all in-flight setup/watchdog tasks and stop every
-        active container.  Called by the launcher's shutdown hook so per-task
-        containers don't leak when the server is SIGTERM'd.
+        """Cancel reaper + in-flight shared-infra repair + per-execution
+        setup/watchdog tasks, then stop every active container.  Called by
+        the launcher's shutdown hook so per-task containers don't leak when
+        the server is SIGTERM'd.
         """
         if self.reaper_task is not None and not self.reaper_task.done():
             self.reaper_task.cancel()
@@ -204,7 +209,19 @@ class ExecutionManager:
                 pass
             self.reaper_task = None
 
-        # Cancel inflight tasks first; cleanup_execution below will docker rm.
+        # Cancel any in-flight shared-infra repair.  Don't wait for the
+        # SIGKILL'd ``deploy_containers.sh`` subprocess to fully reap —
+        # the asyncio task's CancelledError handling kills the proc.
+        if self.deploy_task is not None and not self.deploy_task.done():
+            self.deploy_task.cancel()
+            try:
+                await self.deploy_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self.deploy_task = None
+
+        # Cancel per-execution inflight tasks first; cleanup_execution
+        # below will docker rm.
         for ex in list(self.executions.values()):
             for t in (ex.setup_task, ex.watchdog_task):
                 if t is not None and not t.done():
@@ -364,35 +381,49 @@ class ExecutionManager:
 
     async def ensure_shared_infra_ready(self, *, trigger_repair: bool) -> bool:
         """Authoritative readiness gate for ``/start`` (and observability for
-        ``/health``).  Returns True if shared infra is healthy now; False if
-        we cannot admit a task right now.
+        ``/health``).  Returns True if shared infra is healthy right now;
+        returns False if a task start cannot be admitted right now.
 
-        Concurrency:
-          * If cached health is fresh and ``deploy_status == "ready"``, this
-            returns True immediately, no lock taken.
-          * Otherwise, only one caller is allowed inside ``infra_lock`` at a
-            time.  Other callers see ``infra_lock.locked()`` and return False
-            without spawning a parallel deploy.
+        No HTTP request ever blocks on the slow path:
+          * Cached-and-fresh → return True immediately, no lock.
+          * Cache stale, fast probe healthy (~1 s) → return True.
+          * Cache stale, fast probe finds breakage, ``trigger_repair=True``
+            → schedule ``deploy_containers.sh`` as a background task and
+            return False.  The originating caller bounces with 503 just
+            like everyone else; the repair runs to completion in the
+            background.  Subsequent callers detect the in-flight task via
+            ``self.deploy_task`` and bounce too — no parallel deploys.
+          * A repair is already in flight (``self.deploy_task`` not done)
+            → return False without acquiring the lock.
+
+        Steady-state /start latency: < 1 ms on the cached-fresh path, ~1 s
+        when the cache TTL expires and the fast probe re-runs.  Never the
+        full deploy time, even for the caller that triggered the repair.
         """
         if self.deploy_status == "disabled_debug":
             return True
         if self.cached_infra_is_fresh():
             return True
 
+        # Bounce if a background repair is already in flight.
+        if self.deploy_task is not None and not self.deploy_task.done():
+            return False
+        # Bounce if a peer is currently inside the (short) probe critical
+        # section.  Note that the lock is NOT held for the duration of a
+        # repair — only for the probe + decision + task-spawn.
         if self.infra_lock.locked():
             return False
 
         async with self.infra_lock:
-            # Re-check after acquiring the lock — a peer may have finished.
+            # Re-check everything under the lock; a peer may have raced us.
             if self.deploy_status == "disabled_debug":
                 return True
             if self.cached_infra_is_fresh():
                 return True
+            if self.deploy_task is not None and not self.deploy_task.done():
+                return False
 
-            from .container_mgr import (
-                fast_shared_infra_health_check,
-                run_shared_infra_deploy,
-            )
+            from .container_mgr import fast_shared_infra_health_check
 
             self.deploy_status = "checking"
             healthy, err = await fast_shared_infra_health_check()
@@ -407,31 +438,65 @@ class ExecutionManager:
                 self.last_infra_error = err or "fast health probe failed"
                 return False
 
+            # Probe found breakage and we're allowed to repair.  Schedule
+            # the slow ``deploy_containers.sh`` as a background task; the
+            # status flip + task assignment happens *inside* the lock so
+            # the next caller (entering after we release) sees them both
+            # atomically.
             self.deploy_status = "repairing"
-            try:
-                await run_shared_infra_deploy()
-                ok_after, err_after = await fast_shared_infra_health_check()
-                if not ok_after:
-                    raise RuntimeError(
-                        f"shared infra still unhealthy after redeploy: {err_after}"
-                    )
-                self.deploy_status = "ready"
-                self.last_infra_error = None
-                self.last_infra_check_at = time.time()
-                return True
-            except Exception as exc:
-                self.deploy_status = "failed"
-                self.last_infra_error = repr(exc)
-                log(f"shared-infra deploy FAILED: {exc!r}")
-                return False
+            self.last_infra_error = err  # remember the probe's failure msg
+            self.deploy_task = asyncio.create_task(self._run_background_repair())
+            log("shared-infra repair triggered (deploy_containers.sh) — running in background")
+            return False
+
+    async def _run_background_repair(self) -> None:
+        """Background-task entry point for shared-infra redeploy.
+
+        Holds no lock for its duration; concurrent callers detect this is
+        in flight via ``self.deploy_task``.  Updates ``deploy_status`` and
+        ``last_infra_error`` according to outcome:
+          * success → ``deploy_status = "ready"``, ``last_infra_error = None``
+          * failure → ``deploy_status = "failed"``, ``last_infra_error`` set
+          * cancelled (e.g. server shutdown) → ``deploy_status = "failed"``
+        """
+        from .container_mgr import (
+            fast_shared_infra_health_check,
+            run_shared_infra_deploy,
+        )
+        try:
+            await run_shared_infra_deploy()
+            ok_after, err_after = await fast_shared_infra_health_check()
+            if not ok_after:
+                raise RuntimeError(
+                    f"shared infra still unhealthy after redeploy: {err_after}"
+                )
+            self.deploy_status = "ready"
+            self.last_infra_error = None
+            self.last_infra_check_at = time.time()
+            log("shared-infra repair complete (status=ready)")
+        except asyncio.CancelledError:
+            self.deploy_status = "failed"
+            self.last_infra_error = "repair cancelled"
+            log("shared-infra repair cancelled")
+            raise
+        except Exception as exc:
+            self.deploy_status = "failed"
+            self.last_infra_error = repr(exc)
+            log(f"shared-infra repair FAILED: {exc!r}")
 
     # ── Reaper loop ──────────────────────────────────────────────
 
     async def _reaper_loop(self) -> None:
         """Background task that enforces:
-          * setup_timeout (created_at -> ready), per execution
-          * idle_timeout (last_activity_at), per execution
-          * task lifetime (ready_at + TASK_LIFETIME_SECONDS), per execution
+          * setup_timeout (created_at -> ready), per execution — only while
+            the execution is still in setup
+          * lifetime (ready_at + TASK_LIFETIME_SECONDS), per ready execution
+          * idle_timeout (last_activity_at), per ready execution — the idle
+            clock starts only after setup completes, because preprocessing
+            can take many minutes and shouldn't count against the client's
+            activity budget.  ``last_activity_at`` is re-stamped to
+            ``ready_at`` at the end of ``_run_setup`` so the budget begins
+            cleanly from there.
         """
         try:
             while True:
@@ -441,14 +506,17 @@ class ExecutionManager:
 
                 for ex in list(self.executions.values()):
                     if ex.setup_status != "ready":
+                        # Pre-ready: only the setup_timeout backstop applies.
+                        # No idle check — preprocess time is not idle time.
                         if now - ex.created_at > SETUP_TIMEOUT_SECONDS:
                             victims.append((ex, f"setup exceeded {SETUP_TIMEOUT_SECONDS}s"))
-                            continue
-                    else:
-                        if ex.ready_at is not None and (now - ex.ready_at) > TASK_LIFETIME_SECONDS:
-                            victims.append((ex, f"lifetime exceeded {TASK_LIFETIME_SECONDS}s"))
-                            continue
-                    if (now - ex.last_activity_at) > IDLE_TIMEOUT_SECONDS:
+                        continue
+
+                    # Post-ready: both lifetime and idle apply.
+                    if ex.ready_at is not None and (now - ex.ready_at) > TASK_LIFETIME_SECONDS:
+                        victims.append((ex, f"lifetime exceeded {TASK_LIFETIME_SECONDS}s"))
+                        continue
+                    if (now - ex.last_activity_at) > self.idle_timeout_seconds:
                         victims.append((ex, f"idle for {(now - ex.last_activity_at) / 60:.1f} min"))
 
                 for ex, reason in victims:
