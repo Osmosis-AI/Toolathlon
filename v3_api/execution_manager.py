@@ -426,16 +426,19 @@ class ExecutionManager:
             from .container_mgr import fast_shared_infra_health_check
 
             self.deploy_status = "checking"
+            log("shared-infra: cache stale, running fast probe (probe_shared_infra.sh)")
             healthy, err = await fast_shared_infra_health_check()
             if healthy:
                 self.deploy_status = "ready"
                 self.last_infra_error = None
                 self.last_infra_check_at = time.time()
+                log("shared-infra: probe healthy (deploy_containers.sh not needed)")
                 return True
 
             if not trigger_repair:
                 self.deploy_status = "failed"
                 self.last_infra_error = err or "fast health probe failed"
+                log(f"shared-infra: probe found breakage (repair disabled): {err}")
                 return False
 
             # Probe found breakage and we're allowed to repair.  Schedule
@@ -446,8 +449,39 @@ class ExecutionManager:
             self.deploy_status = "repairing"
             self.last_infra_error = err  # remember the probe's failure msg
             self.deploy_task = asyncio.create_task(self._run_background_repair())
-            log("shared-infra repair triggered (deploy_containers.sh) — running in background")
+            log(f"shared-infra: probe found breakage: {err}")
+            log("shared-infra: triggering deploy_containers.sh in background")
             return False
+
+    def trigger_initial_deploy(self) -> None:
+        """Force a fresh ``deploy_containers.sh`` run at launcher startup.
+
+        Used by ``eval_server_v3.py``'s startup hook to satisfy the
+        operator-requested invariant that every service restart means a
+        fresh infrastructure restart — no probe shortcut, even if the
+        previous instance's containers happen to still be alive.  Bypasses
+        ``ensure_shared_infra_ready``'s "probe first, repair if broken"
+        decision tree and goes straight to scheduling the deploy.
+
+        No-op when ``TOOLATHLON_V3_SKIP_DEPLOY`` is set; ``deploy_status``
+        stays at ``"disabled_debug"`` and admissions proceed without the
+        deploy gate.
+
+        Synchronous: sets state + spawns the background deploy task and
+        returns immediately, so the launcher's startup hook does not block
+        uvicorn from binding the port while the (multi-minute) deploy
+        runs.  Clients arriving in the meantime see ``deploy_status =
+        "repairing"`` and bounce with a fast ``503 infra_repairing``.
+        """
+        if SKIP_DEPLOY:
+            log("shared-infra: TOOLATHLON_V3_SKIP_DEPLOY set, skipping initial deploy")
+            return
+
+        self.deploy_status = "repairing"
+        self.last_infra_error = None
+        self.last_infra_check_at = None
+        self.deploy_task = asyncio.create_task(self._run_background_repair())
+        log("shared-infra: forcing fresh deploy_containers.sh at startup (no probe)")
 
     async def _run_background_repair(self) -> None:
         """Background-task entry point for shared-infra redeploy.

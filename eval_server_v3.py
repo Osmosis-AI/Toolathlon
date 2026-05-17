@@ -87,15 +87,15 @@ async def _startup() -> None:
     reconcile_orphan_containers()
     # Start the per-execution idle/lifetime reaper.
     manager.start_reaper()
-    # Eagerly verify (or trigger background deploy of) shared infrastructure
-    # so the first /start doesn't pay the probe cost and any breakage gets
-    # the background ``deploy_containers.sh`` started before any client
-    # arrives.  Fire-and-forget: uvicorn must not be blocked from binding
-    # the port while a fresh deploy (potentially minutes) runs — clients
-    # that arrive in the meantime see deploy_status="unknown"/"checking"
-    # and bounce with a fast 503 + retry_after_s, exactly like the
-    # mid-repair case.
-    asyncio.create_task(manager.ensure_shared_infra_ready(trigger_repair=True))
+    # Force a fresh deploy_containers.sh on every service start.  No probe
+    # shortcut — operators have asked that a v3 service restart always
+    # means a freshly-deployed shared infrastructure, not "verify the
+    # previous instance's containers are still alive".  Fire-and-forget:
+    # uvicorn must not be blocked from binding the port while the
+    # multi-minute deploy runs; clients arriving in the meantime see
+    # deploy_status="repairing" and bounce with a fast 503 + retry_after_s.
+    # The TOOLATHLON_V3_SKIP_DEPLOY env var still bypasses this for debug.
+    manager.trigger_initial_deploy()
 
 
 @app.on_event("shutdown")
