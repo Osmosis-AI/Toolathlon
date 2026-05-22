@@ -23,12 +23,16 @@ class PortReplacer:
     Applies port changes based on configuration.
     """
 
-    def __init__(self, config_path: str, dry_run: bool = False):
+    def __init__(self, config_path: str, dry_run: bool = False, only_files: set = None):
         self.config_path = config_path
         self.dry_run = dry_run
         self.changes_log = []
         self.project_root = Path(__file__).parent.parent.parent
         self.changes_log_path = self.project_root / "configs" / "port_changes.json"
+        # If set, apply_changes restricts work to these file paths (relative to
+        # project_root). Used by --only mode so a surgical re-apply doesn't
+        # rewrite the full inventory.
+        self.only_files = set(only_files) if only_files else None
 
     def load_config(self) -> Dict:
         """Load port configuration from YAML file."""
@@ -121,6 +125,11 @@ class PortReplacer:
             comment = port_info.get('comment', f'Port {default_port}')
             files = port_info.get('files', [])
 
+            if self.only_files is not None:
+                files = [f for f in files if f in self.only_files]
+                if not files:
+                    continue
+
             print(f"Port {default_port} → {target_port} ({comment})")
 
             port_files_changed = 0
@@ -161,13 +170,28 @@ class PortReplacer:
             print("\n✓ All ports are already at their target values (no changes needed)")
 
         if not self.dry_run and self.changes_log:
-            # Save changes log
+            # In --only mode, merge with any existing changelog so prior
+            # entries (for files this run didn't touch) are preserved.
+            merged_changes = list(self.changes_log)
+            if self.only_files is not None and self.changes_log_path.exists():
+                try:
+                    with open(self.changes_log_path, 'r') as f:
+                        prior = json.load(f)
+                    prior_changes = prior.get('changes', [])
+                    # Drop any prior entries for files we just re-applied,
+                    # so we don't end up with stale duplicates.
+                    touched = {c['file'] for c in self.changes_log}
+                    prior_changes = [c for c in prior_changes if c['file'] not in touched]
+                    merged_changes = prior_changes + self.changes_log
+                except Exception as e:
+                    print(f"⚠ Warning: could not merge existing changelog: {e}")
+
             with open(self.changes_log_path, 'w') as f:
                 json.dump({
                     'instance_prefix': instance_prefix,
                     'instance_suffix': instance_suffix,
                     'applied_at': datetime.now().isoformat(),
-                    'changes': self.changes_log
+                    'changes': merged_changes
                 }, f, indent=2)
             print(f"\nChanges logged to: {self.changes_log_path}")
 

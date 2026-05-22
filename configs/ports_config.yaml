@@ -36,6 +36,7 @@ files_by_port:
     - configs/example_email_config.json
     - deployment/poste/scripts/setup.sh
     - global_preparation/deploy_containers.sh
+    - global_preparation/probe_shared_infra.sh
     - tasks/finalpool/apply-phd-email/email_config.json
     - tasks/finalpool/apply-phd-email/files/receiver_config.json
     - tasks/finalpool/canvas-arrange-exam/emails_config.json
@@ -89,12 +90,14 @@ files_by_port:
     files:
     - deployment/poste/scripts/setup.sh
     - global_preparation/deploy_containers.sh
+    - global_preparation/probe_shared_infra.sh
   1587:
     comment: SMTP submission port
     files:
     - configs/example_email_config.json
     - deployment/poste/scripts/setup.sh
     - global_preparation/deploy_containers.sh
+    - global_preparation/probe_shared_infra.sh
     - tasks/finalpool/apply-phd-email/email_config.json
     - tasks/finalpool/apply-phd-email/files/receiver_config.json
     - tasks/finalpool/canvas-arrange-exam/emails_config.json
@@ -143,6 +146,7 @@ files_by_port:
     - deployment/canvas/scripts/create_canvas_user.py
     - deployment/canvas/scripts/setup.sh
     - global_preparation/deploy_containers.sh
+    - global_preparation/probe_shared_infra.sh
     - tasks/finalpool/canvas-arrange-exam/preprocess/setup_courses_with_mcp.py
     - tasks/finalpool/canvas-art-manager/evaluation/main.py
     - tasks/finalpool/canvas-art-quiz/canvas_api.py
@@ -174,6 +178,7 @@ files_by_port:
     - deployment/woocommerce/configs/multisite-api-keys.json
     - deployment/woocommerce/scripts/setup.sh
     - global_preparation/deploy_containers.sh
+    - global_preparation/probe_shared_infra.sh
     - tasks/finalpool/filter-low-selling-products/token_key_session.py
     - tasks/finalpool/inventory-sync/token_key_session.py
     - tasks/finalpool/update-material-inventory/token_key_session.py
@@ -191,6 +196,7 @@ files_by_port:
     - deployment/poste/scripts/create_users.sh
     - deployment/poste/scripts/setup.sh
     - global_preparation/deploy_containers.sh
+    - global_preparation/probe_shared_infra.sh
   20001:
     comment: Canvas HTTPS port
     files:
