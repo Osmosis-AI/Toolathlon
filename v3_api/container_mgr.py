@@ -236,6 +236,16 @@ async def _run_setup(execution: ExecutionState) -> None:
         elif runtime == "docker":
             if os.path.exists("/var/run/docker.sock"):
                 start_cmd += ["-v", "/var/run/docker.sock:/var/run/docker.sock"]
+        # Bind-mount the shared .mcp-auth dir so OAuth refresh writes from
+        # mcp-remote (e.g. the notion_official server used by the page
+        # duplicator) persist back to the host filesystem.  Without this,
+        # rotated refresh_tokens die with the container and the next
+        # container reads stale tokens, breaking the OAuth grant.  The
+        # ``configs/.mcp-auth`` path matches MCP_REMOTE_CONFIG_DIR set in
+        # configs/mcp_servers/notion_official.yaml.
+        mcp_auth_host = (PROJECT_ROOT / "configs" / ".mcp-auth").resolve()
+        mcp_auth_host.mkdir(parents=True, exist_ok=True)
+        start_cmd += ["-v", f"{mcp_auth_host}:/workspace/configs/.mcp-auth"]
         start_cmd += [
             "-v", f"{output_folder_str}:/workspace/dumps",
             "-v", f"{output_folder_str}:/workspace/logs",
