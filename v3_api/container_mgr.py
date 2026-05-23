@@ -276,10 +276,21 @@ async def _run_setup(execution: ExecutionState) -> None:
             if not src.exists():
                 continue
             if src.is_dir():
+                # Always mkdir the destination AND use the ``src/.`` "contents
+                # only" cp pattern.  Plain ``docker cp src dest`` puts src
+                # inside dest when dest exists — which happens whenever a
+                # bind-mount earlier in this docker run causes Docker to
+                # auto-create the destination's parent (e.g. configs/ is
+                # auto-created here because configs/.mcp-auth is bind-mounted).
+                # Without this pattern, configs/ contents would land at
+                # /workspace/configs/configs/* instead of /workspace/configs/*.
+                _run_cmd([runtime, "exec", container_name, "mkdir", "-p", f"/workspace/{item}"])
+                _run_cmd([runtime, "cp", f"{src}/.", f"{container_name}:/workspace/{item}/"])
+            else:
                 parent = str(Path(item).parent)
                 if parent != ".":
                     _run_cmd([runtime, "exec", container_name, "mkdir", "-p", f"/workspace/{parent}"])
-            _run_cmd([runtime, "cp", str(src), f"{container_name}:/workspace/{item}"])
+                _run_cmd([runtime, "cp", str(src), f"{container_name}:/workspace/{item}"])
 
         _run_cmd([runtime, "exec", container_name, "mkdir", "-p", "/workspace/tasks/finalpool"])
         _run_cmd([runtime, "cp", str(task_source), f"{container_name}:/workspace/tasks/finalpool/"])
