@@ -250,6 +250,19 @@ output_folder=$(realpath "$output_folder")
 RUN_LOG_DIR=$(realpath "$RUN_LOG_DIR")
 
 # Add mounts
+# Bind-mount the host's configs/.mcp-auth so OAuth-refresh writes from
+# mcp-remote inside the container persist back to host disk.  Notion's
+# OAuth refresh_token rotates on every use; without this, the rotated
+# token would die with the container and the next container would
+# read a stale (now-invalidated) token and fail with "Grant not found".
+# The mount path matches MCP_REMOTE_CONFIG_DIR in
+# configs/mcp_servers/notion_official.yaml ("./configs/.mcp-auth", which
+# resolves to /workspace/configs/.mcp-auth inside the container).
+mkdir -p "$PROJECT_ROOT/configs/.mcp-auth"
+START_CONTAINER_ARGS+=(
+    "-v" "$PROJECT_ROOT/configs/.mcp-auth:/workspace/configs/.mcp-auth"
+)
+
 START_CONTAINER_ARGS+=(
     # Mount output folder as /workspace/dumps
     "-v" "$output_folder:/workspace/dumps"
@@ -324,17 +337,29 @@ $CONTAINER_RUNTIME exec "$CONTAINER_NAME" mkdir -p "/workspace/deployment/canvas
 $CONTAINER_RUNTIME exec "$CONTAINER_NAME" mkdir -p "/workspace/global_preparation"
 $CONTAINER_RUNTIME exec "$CONTAINER_NAME" mkdir -p "/workspace/tasks"
 
-# Copy basic files and directories to container
+# Copy basic files and directories to container.
+#
+# For directories, use the ``src/.`` ("contents only") cp pattern with the
+# destination pre-created.  Plain ``docker cp src dest`` would put src
+# INSIDE dest when dest exists — and dest does exist whenever a bind
+# mount above caused Docker to auto-create the destination's parent
+# (e.g. /workspace/configs is auto-created here because we bind-mount
+# /workspace/configs/.mcp-auth).  Without this pattern, configs/ contents
+# would land at /workspace/configs/configs/* instead of /workspace/configs/*,
+# breaking module imports like ``configs.global_configs``.
 for item in "${FILES_TO_COPY[@]}"; do
     if [ -e "$PROJECT_ROOT/$item" ]; then
         echo "  Copying $item to container..."
         if [ -d "$PROJECT_ROOT/$item" ]; then
+            $CONTAINER_RUNTIME exec "$CONTAINER_NAME" mkdir -p "/workspace/$item"
+            $CONTAINER_RUNTIME cp "$PROJECT_ROOT/$item/." "$CONTAINER_NAME:/workspace/$item/"
+        else
             parent_dir=$(dirname "$item")
             if [ "$parent_dir" != "." ]; then
                 $CONTAINER_RUNTIME exec "$CONTAINER_NAME" mkdir -p "/workspace/$parent_dir"
             fi
+            $CONTAINER_RUNTIME cp "$PROJECT_ROOT/$item" "$CONTAINER_NAME:/workspace/$item"
         fi
-        $CONTAINER_RUNTIME cp "$PROJECT_ROOT/$item" "$CONTAINER_NAME:/workspace/$item"
     fi
 done
 
