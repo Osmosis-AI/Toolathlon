@@ -65,6 +65,11 @@ class HealthResponse(BaseModel):
     busy_locks: Dict[str, str] = {}
     last_infra_error: Optional[str] = None
     retry_after_s: Optional[float] = None
+    # Wall-clock (epoch seconds) of last successful deploy_containers.sh.
+    # ``None`` until the initial deploy completes.  Operators / dashboards
+    # can compute (now - last_full_reset_at) to gauge how close the periodic
+    # reset window is.
+    last_full_reset_at: Optional[float] = None
 
 
 # ── Start task ───────────────────────────────────────────────────────

@@ -119,19 +119,20 @@ async def _run_cmd_async(cmd: List[str], timeout: int = 300) -> Tuple[int, str]:
 # ── Shared-infrastructure: fast probe + full deploy ─────────────────
 
 async def fast_shared_infra_health_check() -> Tuple[bool, Optional[str]]:
-    """Run the extracted ``probe_shared_infra.sh`` script.
+    """Run the behavioral shared-infra probe (``probe_shared_infra.py``).
 
-    Returns ``(True, None)`` if every required shared container is healthy,
-    else ``(False, "<details>")`` where details is the script's stderr (one
-    line per failing service).  The script itself bounds each probe so the
-    happy-path latency is on the order of half a second.
+    Returns ``(True, None)`` if every required shared service round-trips
+    successfully, else ``(False, "<details>")`` where details is the
+    probe's stderr (one ``✗`` line per failing service plus per-check
+    timings).  The probe runs all four checks (Canvas, Woo, Poste,
+    kind) in parallel so happy-path wall time is ~1.5-2s.
     """
-    probe = PROJECT_ROOT / "global_preparation" / "probe_shared_infra.sh"
+    probe = PROJECT_ROOT / "global_preparation" / "probe_shared_infra.py"
     if not probe.exists():
         return False, f"probe script missing: {probe}"
     try:
         proc = await asyncio.create_subprocess_exec(
-            "bash", str(probe),
+            "uv", "run", "python", "-m", "global_preparation.probe_shared_infra",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(PROJECT_ROOT),

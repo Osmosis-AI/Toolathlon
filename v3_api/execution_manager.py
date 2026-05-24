@@ -91,6 +91,20 @@ IDLE_TIMEOUT_SECONDS = int(os.environ.get("TOOLATHLON_V3_IDLE_TIMEOUT_SECONDS", 
 REAPER_INTERVAL_SECONDS = int(os.environ.get("TOOLATHLON_V3_REAPER_INTERVAL_SECONDS", "60"))
 SKIP_DEPLOY = os.environ.get("TOOLATHLON_V3_SKIP_DEPLOY", "").lower() in ("1", "true", "yes")
 INFRA_HEALTH_TTL_SECONDS = float(os.environ.get("TOOLATHLON_V3_INFRA_HEALTH_TTL_SECONDS", "30"))
+
+# Periodic full reset (deploy_containers.sh re-run) cadence.  The reaper
+# fires a fresh deploy whenever ALL of these hold simultaneously:
+#   1. ``last_full_reset_at`` is at least this many seconds in the past
+#   2. ``deploy_status == "ready"`` (not already repairing / checking)
+#   3. ``deploy_task`` is None or done (no deploy in flight)
+#   4. ``len(self.executions) == 0`` (no tasks admitted right now)
+# Condition 4 is the operator-mandated gate: a reset must never interrupt
+# a running task.  If a new task is admitted before the reset window
+# closes, the reset is deferred to the next reaper tick that finds the
+# executions dict empty again.  Set to ``0`` to disable periodic resets.
+PERIODIC_RESET_INTERVAL_SECONDS = int(
+    os.environ.get("TOOLATHLON_V3_PERIODIC_RESET_INTERVAL_SECONDS", "14400")
+)  # 4h default
 INFRA_RETRY_AFTER_SECONDS = float(os.environ.get("TOOLATHLON_V3_INFRA_RETRY_AFTER_SECONDS", "30"))
 
 
@@ -188,6 +202,10 @@ class ExecutionManager:
         self.deploy_task: Optional[asyncio.Task] = None
         self.last_infra_check_at: Optional[float] = None
         self.last_infra_error: Optional[str] = None
+        # Wall-clock time of the most recent successful deploy_containers.sh
+        # completion (set by ``_run_background_repair`` on success).  Used by
+        # the reaper to gate periodic resets — see PERIODIC_RESET_INTERVAL_SECONDS.
+        self.last_full_reset_at: Optional[float] = None
 
     # ── Lifecycle ────────────────────────────────────────────────
 
@@ -426,7 +444,7 @@ class ExecutionManager:
             from .container_mgr import fast_shared_infra_health_check
 
             self.deploy_status = "checking"
-            log("shared-infra: cache stale, running fast probe (probe_shared_infra.sh)")
+            log("shared-infra: cache stale, running behavioral probe (probe_shared_infra.py)")
             healthy, err = await fast_shared_infra_health_check()
             if healthy:
                 self.deploy_status = "ready"
@@ -506,7 +524,9 @@ class ExecutionManager:
                 )
             self.deploy_status = "ready"
             self.last_infra_error = None
-            self.last_infra_check_at = time.time()
+            now = time.time()
+            self.last_infra_check_at = now
+            self.last_full_reset_at = now
             log("shared-infra repair complete (status=ready)")
         except asyncio.CancelledError:
             self.deploy_status = "failed"
@@ -562,8 +582,42 @@ class ExecutionManager:
                         await self.cleanup_execution(ex, reason=f"reaper:{reason}")
                     except Exception as e:
                         log(f"reaper: cleanup_execution({ex.execution_id}) failed: {e!r}")
+
+                # ── Periodic full reset of shared infra ─────────────────
+                # Re-run deploy_containers.sh after PERIODIC_RESET_INTERVAL_SECONDS
+                # have elapsed since the last completion, but ONLY when no
+                # tasks are admitted right now.  ``manager_lock`` makes the
+                # check + status flip atomic w.r.t. admission, so a task
+                # cannot slip in between the empty check and the deploy
+                # starting.  If a task is in flight, we defer to the next
+                # reaper tick that finds the dict empty again.
+                if PERIODIC_RESET_INTERVAL_SECONDS > 0:
+                    await self._maybe_periodic_reset(now)
         except asyncio.CancelledError:
             pass
+
+    async def _maybe_periodic_reset(self, now: float) -> None:
+        async with self.manager_lock:
+            if self.deploy_status != "ready":
+                return
+            if self.deploy_task is not None and not self.deploy_task.done():
+                return
+            if self.executions:
+                return  # operator-mandated gate: never interrupt a task
+            if self.last_full_reset_at is None:
+                return
+            elapsed = now - self.last_full_reset_at
+            if elapsed < PERIODIC_RESET_INTERVAL_SECONDS:
+                return
+
+            log(
+                f"periodic reset: {elapsed / 3600:.1f}h since last reset "
+                f"and 0 active tasks — scheduling deploy_containers.sh"
+            )
+            self.deploy_status = "repairing"
+            self.last_infra_error = None
+            self.last_infra_check_at = None  # invalidate the probe cache
+            self.deploy_task = asyncio.create_task(self._run_background_repair())
 
 
 # Module-level singleton.  The launcher constructs it once; the router

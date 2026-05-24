@@ -130,6 +130,7 @@ async def health_endpoint():
         busy_locks=manager.busy_locks_snapshot(),
         last_infra_error=manager.last_infra_error,
         retry_after_s=retry_after,
+        last_full_reset_at=manager.last_full_reset_at,
     )
 
 
