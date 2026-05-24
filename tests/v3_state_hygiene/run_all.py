@@ -18,6 +18,9 @@ MODULES = [
     "tests.v3_state_hygiene.test_periodic_reset",
     "tests.v3_state_hygiene.test_cleanup_helpers",
     "tests.v3_state_hygiene.test_v3_endpoints",
+    # Heaviest test last — it runs each picked task's preprocess twice;
+    # k8s alone takes ~4 minutes for the full kind cluster recreate.
+    "tests.v3_state_hygiene.test_preprocess_reproducibility",
 ]
 
 
