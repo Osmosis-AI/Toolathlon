@@ -163,7 +163,6 @@ files_by_port:
     - tasks/finalpool/canvas-new-students-notification/preprocess/main.py
     - tasks/finalpool/canvas-submit-late-work/evaluation/check_remote.py
     - tasks/finalpool/canvas-submit-late-work/preprocess/setup_courses_with_mcp.py
-    - tasks/finalpool/woocommerce-product-recall/preprocess/setup_recall_data.py
     - utils/app_specific/canvas/api_client.py
     - utils/app_specific/canvas/tools/README.md
     - utils/app_specific/canvas/tools/assignment_manager.py
