@@ -60,7 +60,71 @@ async def _check_does_not_fire_when_status_not_ready() -> Tuple[str, bool, str]:
     await m._maybe_periodic_reset(time.time())
     if m.deploy_task is not None:
         return "no_fire_status_not_ready", False, "deploy_task was scheduled despite status != ready"
+    if m.deploy_status not in ("checking",):
+        return "no_fire_status_not_ready", False, f"status overwritten to {m.deploy_status!r}"
     return "no_fire_status_not_ready", True, "trigger correctly suppressed"
+
+
+async def _check_enters_drain_when_tasks_active() -> Tuple[str, bool, str]:
+    """When 4h has elapsed AND tasks are still active, the reset should
+    enter the DRAIN state, blocking new admissions while letting the
+    existing tasks finish."""
+    m = _fresh_manager()
+    m.deploy_status = "ready"
+    m.last_full_reset_at = time.time() - em.PERIODIC_RESET_INTERVAL_SECONDS - 100
+    # Inject a fake active execution
+    ex = _fake_execution()
+    m.executions[ex.execution_id] = ex
+    await m._maybe_periodic_reset(time.time())
+    if m.deploy_status != "draining":
+        return "enters_drain", False, (
+            f"status should flip to 'draining' but is {m.deploy_status!r}"
+        )
+    if m.deploy_task is not None:
+        return "enters_drain", False, "deploy_task scheduled while tasks still active"
+    return "enters_drain", True, "status flipped to 'draining', deploy deferred"
+
+
+async def _check_drain_completes_after_tasks_finish() -> Tuple[str, bool, str]:
+    """While in DRAIN, once executions becomes empty, the next reaper
+    tick should fire the deploy."""
+    m = _fresh_manager()
+    m.deploy_status = "draining"
+    m.last_full_reset_at = time.time() - em.PERIODIC_RESET_INTERVAL_SECONDS - 100
+    # Empty executions: drained
+    await m._maybe_periodic_reset(time.time())
+    if m.deploy_task is None:
+        return "drain_completes", False, "deploy_task NOT scheduled after drain"
+    if m.deploy_status != "repairing":
+        return "drain_completes", False, f"status should be 'repairing' but is {m.deploy_status!r}"
+    try:
+        await asyncio.wait_for(m.deploy_task, timeout=5.0)
+    except asyncio.TimeoutError:
+        return "drain_completes", False, "fake repair did not complete"
+    if m.deploy_status != "ready":
+        return "drain_completes", False, f"after repair, status should be 'ready' but is {m.deploy_status!r}"
+    return "drain_completes", True, "drain → repairing → ready, 4h clock restarted"
+
+
+async def _check_drain_admission_blocked() -> Tuple[str, bool, str]:
+    """During DRAIN, admission gate must reject with INFRA_DRAINING."""
+    m = _fresh_manager()
+    m.deploy_status = "draining"
+    # Try to admit a task — should fail with INFRA_DRAINING
+    from v3_api.execution_manager import AdmissionOutcome
+    try:
+        result = await m.try_admit(
+            task_id="x", container_name="x", gateway_port=0,
+            gateway_url="", output_folder="/tmp",
+            model_name=None, client_id=None, metadata={},
+        )
+    except Exception as e:
+        return "drain_admission_blocked", False, f"admission raised: {e!r}"
+    if result.outcome != AdmissionOutcome.INFRA_DRAINING:
+        return "drain_admission_blocked", False, (
+            f"expected INFRA_DRAINING outcome, got {result.outcome}"
+        )
+    return "drain_admission_blocked", True, "admission rejected with INFRA_DRAINING"
 
 
 async def _check_does_not_fire_when_deploy_in_flight() -> Tuple[str, bool, str]:
@@ -87,16 +151,24 @@ async def _check_does_not_fire_when_deploy_in_flight() -> Tuple[str, bool, str]:
 
 
 async def _check_does_not_fire_when_tasks_active() -> Tuple[str, bool, str]:
+    """With the new drain semantics, when tasks are active and 4h has
+    elapsed, the reset DOES start (by flipping to 'draining') but it
+    does NOT schedule deploy_task until tasks finish.  This test
+    verifies the deploy_task gate."""
     m = _fresh_manager()
     m.deploy_status = "ready"
     m.last_full_reset_at = time.time() - em.PERIODIC_RESET_INTERVAL_SECONDS - 100
-    # Inject a fake active execution
     ex = _fake_execution()
     m.executions[ex.execution_id] = ex
     await m._maybe_periodic_reset(time.time())
     if m.deploy_task is not None:
         return "no_fire_tasks_active", False, "deploy_task scheduled despite 1 active execution"
-    return "no_fire_tasks_active", True, "trigger correctly suppressed (1 active task)"
+    # Status SHOULD now be draining (the new behavior)
+    if m.deploy_status != "draining":
+        return "no_fire_tasks_active", False, (
+            f"status should be 'draining' but is {m.deploy_status!r}"
+        )
+    return "no_fire_tasks_active", True, "drain entered, deploy deferred"
 
 
 async def _check_does_not_fire_before_interval() -> Tuple[str, bool, str]:
@@ -198,6 +270,9 @@ CHECKS = [
     _check_does_fire_when_all_conditions_met,
     _check_cache_invalidated_on_fire,
     _check_admission_blocked_during_reset,
+    _check_enters_drain_when_tasks_active,
+    _check_drain_completes_after_tasks_finish,
+    _check_drain_admission_blocked,
 ]
 
 

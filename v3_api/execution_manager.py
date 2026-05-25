@@ -92,16 +92,20 @@ REAPER_INTERVAL_SECONDS = int(os.environ.get("TOOLATHLON_V3_REAPER_INTERVAL_SECO
 SKIP_DEPLOY = os.environ.get("TOOLATHLON_V3_SKIP_DEPLOY", "").lower() in ("1", "true", "yes")
 INFRA_HEALTH_TTL_SECONDS = float(os.environ.get("TOOLATHLON_V3_INFRA_HEALTH_TTL_SECONDS", "30"))
 
-# Periodic full reset (deploy_containers.sh re-run) cadence.  The reaper
-# fires a fresh deploy whenever ALL of these hold simultaneously:
-#   1. ``last_full_reset_at`` is at least this many seconds in the past
-#   2. ``deploy_status == "ready"`` (not already repairing / checking)
-#   3. ``deploy_task`` is None or done (no deploy in flight)
-#   4. ``len(self.executions) == 0`` (no tasks admitted right now)
-# Condition 4 is the operator-mandated gate: a reset must never interrupt
-# a running task.  If a new task is admitted before the reset window
-# closes, the reset is deferred to the next reaper tick that finds the
-# executions dict empty again.  Set to ``0`` to disable periodic resets.
+# Periodic full reset (deploy_containers.sh re-run) cadence.  The
+# reaper drives a two-phase reset:
+#   Phase 1 — DRAIN: once this many seconds have elapsed since the last
+#   successful reset, ``deploy_status`` flips to ``"draining"``.
+#   Admission immediately starts rejecting new tasks with INFRA_DRAINING;
+#   in-flight tasks continue undisturbed.
+#   Phase 2 — RESET: once the executions dict drains to empty (in-flight
+#   tasks finish naturally OR get reaped by setup/lifetime/idle timers),
+#   ``deploy_status`` flips to ``"repairing"`` and ``deploy_containers.sh``
+#   runs.  On success ``last_full_reset_at`` is re-stamped and the 4h
+#   clock restarts.
+# This guarantees a reset cadence of (4h + worst-case drain duration),
+# bounded by the lifetime timer (TASK_LIFETIME_SECONDS, default 90 min).
+# Set to ``0`` to disable periodic resets entirely.
 PERIODIC_RESET_INTERVAL_SECONDS = int(
     os.environ.get("TOOLATHLON_V3_PERIODIC_RESET_INTERVAL_SECONDS", "14400")
 )  # 4h default
@@ -165,6 +169,8 @@ class AdmissionOutcome(str, Enum):
     CONFLICT_GROUP_BUSY = "conflict_group_busy"
     INFRA_CHECKING = "infra_checking"
     INFRA_REPAIRING = "infra_repairing"
+    INFRA_DRAINING = "infra_draining"        # 4h elapsed; finishing existing
+                                              # tasks then doing a reset
     INFRA_FAILED = "infra_failed"
     INFRA_DISABLED_OR_UNKNOWN = "infra_disabled_or_unknown"
 
@@ -297,6 +303,7 @@ class ExecutionManager:
                 outcome = {
                     "checking":  AdmissionOutcome.INFRA_CHECKING,
                     "repairing": AdmissionOutcome.INFRA_REPAIRING,
+                    "draining":  AdmissionOutcome.INFRA_DRAINING,
                     "failed":    AdmissionOutcome.INFRA_FAILED,
                     "unknown":   AdmissionOutcome.INFRA_DISABLED_OR_UNKNOWN,
                 }.get(self.deploy_status, AdmissionOutcome.INFRA_DISABLED_OR_UNKNOWN)
@@ -420,6 +427,11 @@ class ExecutionManager:
         """
         if self.deploy_status == "disabled_debug":
             return True
+        # If we're already in a non-ready transition state, the
+        # admission gate will reject correctly; never overwrite that
+        # state by running the routine probe.
+        if self.deploy_status == "draining":
+            return False
         if self.cached_infra_is_fresh():
             return True
 
@@ -436,6 +448,8 @@ class ExecutionManager:
             # Re-check everything under the lock; a peer may have raced us.
             if self.deploy_status == "disabled_debug":
                 return True
+            if self.deploy_status == "draining":
+                return False
             if self.cached_infra_is_fresh():
                 return True
             if self.deploy_task is not None and not self.deploy_task.done():
@@ -597,27 +611,47 @@ class ExecutionManager:
             pass
 
     async def _maybe_periodic_reset(self, now: float) -> None:
-        async with self.manager_lock:
-            if self.deploy_status != "ready":
-                return
-            if self.deploy_task is not None and not self.deploy_task.done():
-                return
-            if self.executions:
-                return  # operator-mandated gate: never interrupt a task
-            if self.last_full_reset_at is None:
-                return
-            elapsed = now - self.last_full_reset_at
-            if elapsed < PERIODIC_RESET_INTERVAL_SECONDS:
-                return
+        """Two-phase periodic reset:
 
-            log(
-                f"periodic reset: {elapsed / 3600:.1f}h since last reset "
-                f"and 0 active tasks — scheduling deploy_containers.sh"
-            )
-            self.deploy_status = "repairing"
-            self.last_infra_error = None
-            self.last_infra_check_at = None  # invalidate the probe cache
-            self.deploy_task = asyncio.create_task(self._run_background_repair())
+          Phase 1 — DRAIN: once PERIODIC_RESET_INTERVAL_SECONDS has elapsed
+          since the last successful reset, flip ``deploy_status`` to
+          ``"draining"``.  Admission immediately starts rejecting new
+          tasks with INFRA_DRAINING.  In-flight tasks continue running
+          undisturbed.
+
+          Phase 2 — RESET: once the executions dict drains to empty
+          (either naturally, or because the reaper killed timed-out
+          tasks), flip ``deploy_status`` to ``"repairing"`` and schedule
+          ``_run_background_repair`` which runs deploy_containers.sh and
+          re-probes.  On success it sets status back to ``"ready"`` and
+          re-stamps ``last_full_reset_at`` — restarting the 4h clock.
+        """
+        async with self.manager_lock:
+            if self.deploy_task is not None and not self.deploy_task.done():
+                return  # a repair (manual or periodic) is already in flight
+            if self.last_full_reset_at is None:
+                return  # no baseline yet — wait for initial deploy
+            elapsed = now - self.last_full_reset_at
+
+            # Phase 1: enter drain
+            if self.deploy_status == "ready" and elapsed >= PERIODIC_RESET_INTERVAL_SECONDS:
+                log(
+                    f"periodic reset: {elapsed / 3600:.1f}h elapsed — "
+                    f"entering DRAIN; {len(self.executions)} active task(s) "
+                    f"must finish before reset runs"
+                )
+                self.deploy_status = "draining"
+                self.last_infra_error = None
+
+            # Phase 2: once drained, reset
+            if self.deploy_status == "draining" and not self.executions:
+                log(
+                    f"periodic reset: drain complete (0 active tasks) — "
+                    f"scheduling deploy_containers.sh"
+                )
+                self.deploy_status = "repairing"
+                self.last_infra_check_at = None  # invalidate probe cache
+                self.deploy_task = asyncio.create_task(self._run_background_repair())
 
 
 # Module-level singleton.  The launcher constructs it once; the router

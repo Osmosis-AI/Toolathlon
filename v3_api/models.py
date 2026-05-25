@@ -51,6 +51,10 @@ class HealthResponse(BaseModel):
     ``deploy_status`` values:
       * ``checking``       — fast health probe in progress
       * ``repairing``      — shared-infra deploy/redeploy running
+      * ``draining``       — periodic-reset window has opened; new task
+                             admission is blocked and the service is
+                             waiting for in-flight tasks to finish before
+                             running ``deploy_containers.sh``
       * ``ready``          — task starts may be admitted
       * ``failed``         — last check/repair failed; ``last_infra_error``
                              explains why

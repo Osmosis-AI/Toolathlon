@@ -178,6 +178,7 @@ async def start_task_endpoint(task_id: str, req: StartTaskRequest):
             reason_map = {
                 "checking":  "infra_checking",
                 "repairing": "infra_repairing",
+                "draining":  "infra_draining",
                 "failed":    "infra_failed",
                 "unknown":   "infra_disabled_or_unknown",
             }
