@@ -232,6 +232,12 @@ def setup_test_environment() -> bool:
         product_mapping = setup_woocommerce_products(wc_client)
 
         # Create orders using OrderSimulator
+        # Seed RNG so repeated preprocess runs produce identical orders
+        # (same products selected, quantities, customer).  Without this,
+        # each run generates a different inventory-demand pattern and the
+        # agent's expected output diverges.
+        import random
+        random.seed(42)
         logger.info("📦 Creating orders...")
         order_simulator = OrderSimulator(wc_client)
         test_orders = order_simulator.simulate_order_batch(count=3, interval=2)
