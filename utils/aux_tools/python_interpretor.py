@@ -30,18 +30,22 @@ async def on_python_execute_tool_invoke(context: RunContextWrapper, params_str: 
         # Create .python_tmp directory
         tmp_dir = os.path.join(agent_workspace, '.python_tmp')
         os.makedirs(tmp_dir, exist_ok=True)
-        
-        
+
+
         # Create Python file
         file_path = os.path.join(tmp_dir, filename)
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write(code)
-        
+
         # Record start time
         import time
         start_time = time.time()
-        
-        # Execute Python file
+
+        # Subprocess inherits the parent's UID — when run inside the
+        # task container, the gateway is launched as UID 1000 and the
+        # filesystem is whitelist-restricted (see v3_api/container_mgr.py
+        # ``_lockdown_agent_filesystem``), so this subprocess can only
+        # read /workspace/dumps/workspace + system paths.
         cmd = f"uv run --directory {agent_workspace} ./.python_tmp/{filename}"
         try:
             result = subprocess.run(

@@ -415,6 +415,66 @@ async def _run_setup(execution: ExecutionState) -> None:
         else:
             raise RuntimeError(f"Gateway not ready on port {gateway_port} after {GATEWAY_STARTUP_TIMEOUT}s")
 
+        # Step 6.5: Whitelist-restrict the agent's filesystem view.
+        # ---------------------------------------------------------------
+        # The gateway has now loaded into memory everything it needs at
+        # boot (its own Python source, configs, MCP server YAML, utils,
+        # task bundle, …).  Any subprocess the gateway spawns from here
+        # on — MCP server fork-respawns, python_execute, bash, etc. —
+        # inherits UID 1000 from the gateway.  We now restrict what
+        # that UID can read so the agent's entire surface is whitelisted:
+        #
+        #   ALLOWED:
+        #     /workspace/dumps/**           (agent's RW area)
+        #     /workspace/configs/.mcp-auth  (OAuth token rotation)
+        #     /workspace/.venv              (image-provided Python env, ro)
+        #     /usr, /lib, /lib64, /bin, /etc, /tmp, /home/agent
+        #
+        #   FORBIDDEN (chmod 700 root):
+        #     /workspace/tasks/**           (eval, groundtruth, prompts)
+        #     /workspace/utils/**           (gateway code, shared helpers)
+        #     /workspace/scripts/**         (gateway, eval entry points)
+        #     /workspace/deployment/**      (deploy scripts)
+        #     /workspace/main.py
+        #     /workspace/local_binary/**
+        #     /workspace/configs/token_key_session.py + admin-cred files
+        #
+        # /workspace/configs/ itself stays mode 711 (traversable) so
+        # MCP_REMOTE_CONFIG_DIR=/workspace/configs/.mcp-auth still works.
+        #
+        # ``run_eval`` later execs as root (default user) which bypasses
+        # all of this, so the grader keeps full access.
+        lockdown_cmd = """
+set -e
+TASK=/workspace/tasks/finalpool
+# Tasks dir: agent never needs to read it at runtime
+chmod -R go-rwx /workspace/tasks 2>/dev/null || true
+chmod 700 /workspace/tasks /workspace/tasks/finalpool 2>/dev/null || true
+# Shared code dirs: gateway loaded these into memory at boot
+chmod -R go-rwx /workspace/utils /workspace/scripts /workspace/deployment 2>/dev/null || true
+chmod 700 /workspace/utils /workspace/scripts /workspace/deployment 2>/dev/null || true
+chmod 700 /workspace/local_binary 2>/dev/null || true
+chmod 600 /workspace/main.py 2>/dev/null || true
+# Sensitive config files (admin tokens etc.) — file-level lock
+for f in token_key_session.py users_data.json users_data.csv \\
+         gcp-service_account.keys.json google_credentials.json \\
+         all_token_key_session.py gcp-oauth.keys.json ports_config.yaml; do
+    chmod 600 /workspace/configs/$f 2>/dev/null || true
+done
+# Configs dir stays traversable (so .mcp-auth subdir is reachable for
+# OAuth token rotation by mcp-remote) but file listing is blocked.
+chmod 711 /workspace/configs 2>/dev/null || true
+# Lock the mcp_servers/ subdir too — agent shouldn't see service configs
+chmod -R go-rwx /workspace/configs/mcp_servers 2>/dev/null || true
+chmod 700 /workspace/configs/mcp_servers 2>/dev/null || true
+# .mcp-auth stays accessible to UID 1000 (Step 4.5 chowned it)
+"""
+        _run_cmd(
+            [runtime, "exec", container_name, "bash", "-c", lockdown_cmd],
+            timeout=30,
+        )
+        log(f"Filesystem whitelist applied for {execution.execution_id}: agent UID 1000 can only read workspace + .mcp-auth + system paths")
+
         # Step 7: Query tool schemas
         execution.setup_phase = "tool_query"
         tools: List[ToolDef] = []
