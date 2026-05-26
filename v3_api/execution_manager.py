@@ -473,10 +473,37 @@ class ExecutionManager:
                 log(f"shared-infra: probe found breakage (repair disabled): {err}")
                 return False
 
-            # Probe found breakage and we're allowed to repair.  Schedule
-            # the slow ``deploy_containers.sh`` as a background task; the
-            # status flip + task assignment happens *inside* the lock so
-            # the next caller (entering after we release) sees them both
+            # Probe found breakage and we're allowed to repair.  But if
+            # there are active in-flight tasks, repairing right now would
+            # rebuild the shared containers (deploy_containers.sh nukes
+            # canvas-docker, woo-wp, poste) which invalidates every
+            # per-user token / re-initializes every account → the agent's
+            # currently-running tool calls suddenly start returning
+            # ``canvas_health_check: error``, even though admission saw a
+            # healthy probe.
+            #
+            # In that situation, defer the repair: mark status as
+            # ``"failed"`` (admission rejects new tasks with INFRA_FAILED
+            # + retry_after) and DON'T schedule the repair task.  Once
+            # active tasks drain (naturally or via reaper), a subsequent
+            # probe check will re-find the breakage with executions
+            # empty and finally trigger the repair.  Worst case: the
+            # in-flight tasks fail anyway from the original infra
+            # breakage, but we don't compound the failure by rebuilding
+            # underneath them.
+            if self.executions:
+                self.deploy_status = "failed"
+                self.last_infra_error = err
+                log(
+                    f"shared-infra: probe found breakage but {len(self.executions)} "
+                    f"active task(s) — DEFERRING repair until drain: {err}"
+                )
+                return False
+
+            # No active tasks — safe to repair.  Schedule the slow
+            # ``deploy_containers.sh`` as a background task; the status
+            # flip + task assignment happens *inside* the lock so the
+            # next caller (entering after we release) sees them both
             # atomically.
             self.deploy_status = "repairing"
             self.last_infra_error = err  # remember the probe's failure msg
