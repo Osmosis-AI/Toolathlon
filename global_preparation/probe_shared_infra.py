@@ -325,15 +325,49 @@ def check_kind_behavioral(instance_suffix: str) -> Tuple[bool, str]:
     return True, ""
 
 
+# ── Retry wrapper ─────────────────────────────────────────────────
+# Each individual check (canvas REST GET, woo REST GET, poste round-trip,
+# kind pod apply) can transiently fail under normal load — DB momentarily
+# locked, a packet drop, IMAP indexer pause, kubelet GC.  Reporting "infra
+# broken" on a single such hiccup is too aggressive because the caller
+# (ensure_shared_infra_ready) will then trigger a destructive repair
+# (deploy_containers.sh tears down the shared containers).  We retry
+# each check up to PROBE_CHECK_ATTEMPTS times with PROBE_CHECK_BACKOFF_S
+# between tries; a check is only declared failed if EVERY attempt failed.
+
+PROBE_CHECK_ATTEMPTS = 2
+PROBE_CHECK_BACKOFF_S = 1.0
+
+
+def _with_retry(fn: Callable[[], Tuple[bool, str]]) -> Tuple[bool, str]:
+    """Run an individual check with retries on transient failure."""
+    last_ok, last_detail = False, "no attempts"
+    for i in range(PROBE_CHECK_ATTEMPTS):
+        if i > 0:
+            time.sleep(PROBE_CHECK_BACKOFF_S)
+        try:
+            last_ok, last_detail = fn()
+        except Exception as e:
+            last_ok, last_detail = False, f"unhandled exception: {e!r}"
+        if last_ok:
+            if i > 0:
+                # Note the recovery in the detail so operators can see
+                # transient flakes in the success log line.
+                last_detail = (last_detail or "") + f" (recovered after {i + 1} attempts)"
+            return last_ok, last_detail
+    # All attempts failed
+    return last_ok, last_detail + f" (after {PROBE_CHECK_ATTEMPTS} attempts)"
+
+
 # ── Runner ────────────────────────────────────────────────────────
 
 def run() -> int:
     ports = _resolve_ports()
     checks: List[Tuple[str, Callable[[], Tuple[bool, str]]]] = [
-        ("canvas", lambda: check_canvas(ports["canvas_http"])),
-        ("woo",    lambda: check_woo(ports["woo"])),
-        ("poste",  lambda: check_poste_behavioral(ports["poste_smtp"], ports["poste_imap"])),
-        ("kind",   lambda: check_kind_behavioral(ports["instance_suffix"])),
+        ("canvas", lambda: _with_retry(lambda: check_canvas(ports["canvas_http"]))),
+        ("woo",    lambda: _with_retry(lambda: check_woo(ports["woo"]))),
+        ("poste",  lambda: _with_retry(lambda: check_poste_behavioral(ports["poste_smtp"], ports["poste_imap"]))),
+        ("kind",   lambda: _with_retry(lambda: check_kind_behavioral(ports["instance_suffix"]))),
     ]
 
     results: List[Tuple[str, bool, str, float]] = []
