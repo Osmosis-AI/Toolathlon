@@ -13,6 +13,37 @@ echo "==========================================================================
 sleep 5
 
 # ---------------------------------------------------------------------------
+# Reclaim disk that previous failed-deploy attempts may have leaked.
+#
+# Every time a shared-infra container crashes (e.g. MariaDB OOM, or wp
+# multisite-convert wedging the db init) and setup.sh restarts it, docker
+# creates a fresh anonymous volume for the new container.  The old volume
+# is left behind ("dangling") — across thousands of failed restarts these
+# accumulate to hundreds of GB and eventually fill the disk, at which
+# point ALL subsequent deploys fail with "No space left on device" from
+# inside mysqld.
+#
+# We prune at the START of every deploy so we always begin with the
+# largest possible amount of free disk.  Three classes are safe to prune:
+#   - Dangling volumes (no container references them)
+#   - Stopped containers older than 24h (per-task v2/v3 containers that
+#     finished + any abandoned setup attempts)
+#   - Dangling images (no tag, no container)
+#
+# Each prune lists what it freed; in normal steady-state these report ~0B.
+# ---------------------------------------------------------------------------
+echo "============================================================================================="
+echo "Disk-reclaim sweep before deploy ..."
+echo "============================================================================================="
+df -h / | awk 'NR==1 || /\//' | head -2
+docker volume prune -f 2>&1 | grep -E "reclaimed|^[a-f0-9]{6,}" | tail -3 || true
+docker container prune -f --filter "until=24h" 2>&1 | grep -E "reclaimed|^[a-f0-9]{6,}" | tail -3 || true
+docker image prune -f 2>&1 | grep -E "reclaimed" | tail -1 || true
+df -h / | awk '/\//' | head -1
+echo "============================================================================================="
+echo ""
+
+# ---------------------------------------------------------------------------
 # Per-service ports.  apply_port_numbers.py rewrites these via its bounded
 # regex (`(?<![0-9])<old>(?![0-9])`) on every run, so both this file's named
 # variables and the REQUIRED_PORTS array stay in sync with ports_config.yaml.
