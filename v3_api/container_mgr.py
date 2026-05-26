@@ -333,6 +333,31 @@ async def _run_setup(execution: ExecutionState) -> None:
             raise RuntimeError(f"Preprocess failed (exit {returncode}): {stdout[-2000:]}")
         log(f"Preprocess done for {task_id}")
 
+        # Step 4.5: Withhold grader-side artifacts from the agent
+        # ----------------------------------------------------------
+        # The agent runs inside the container as root and has unrestricted
+        # filesystem access via the python_execute local tool.  If the
+        # task's ``evaluation/`` and ``groundtruth_workspace/`` dirs stay
+        # on disk during agent runtime, a sufficiently clever agent (or
+        # one with reward-hacking heuristics) can simply read the
+        # groundtruth file and emit a passing answer without doing the
+        # work.
+        #
+        # Both dirs are needed by preprocess (some tasks pre-compute
+        # groundtruth there), so we can only purge them AFTER preprocess
+        # finishes.  ``run_eval`` later re-materialises them from the
+        # host before invoking ``scripts.decoupled.container_eval``.
+        task_in_container = f"/workspace/tasks/finalpool/{task_id}"
+        purge_cmd = (
+            f"rm -rf {task_in_container}/evaluation "
+            f"{task_in_container}/groundtruth_workspace"
+        )
+        _run_cmd(
+            [runtime, "exec", container_name, "bash", "-c", purge_cmd],
+            timeout=30,
+        )
+        log(f"Withheld evaluation/ + groundtruth_workspace/ for {task_id}")
+
         # Step 5: Start gateway
         execution.setup_phase = "gateway_boot"
         gateway_cmd = (
@@ -470,7 +495,28 @@ async def run_eval(execution: ExecutionState) -> GradeResponse:
     """
     runtime = _get_container_runtime()
     container = execution.container_name
+    task_id = execution.task_id
     log(f"Running evaluation for execution {execution.execution_id}")
+
+    # Re-materialise the grader-side dirs that were withheld from the
+    # agent at the end of preprocess (see start_execution Step 4.5).
+    # We copy from the host now so the eval has access to the
+    # groundtruth + grading code that the agent could not see.
+    task_source = PROJECT_ROOT / "tasks" / "finalpool" / task_id
+    target_task_dir = f"/workspace/tasks/finalpool/{task_id}"
+    for sub in ("evaluation", "groundtruth_workspace"):
+        src = task_source / sub
+        if not src.exists():
+            continue
+        _run_cmd(
+            [runtime, "exec", container, "mkdir", "-p", f"{target_task_dir}/{sub}"],
+            timeout=15,
+        )
+        _run_cmd(
+            [runtime, "cp", f"{src}/.", f"{container}:{target_task_dir}/{sub}/"],
+            timeout=120,
+        )
+    log(f"Restored evaluation + groundtruth for {execution.execution_id}")
 
     eval_cmd = (
         "uv run python -m scripts.decoupled.container_eval "
