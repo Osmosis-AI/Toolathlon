@@ -48,7 +48,10 @@ GATEWAY_STARTUP_TIMEOUT = int(os.environ.get("TOOLATHLON_V3_GATEWAY_STARTUP_TIME
 TOOL_QUERY_TIMEOUT = 10
 LONG_STEP_TIMEOUT = 30 * 60
 DEPLOY_TIMEOUT = 30 * 60          # outer cap on deploy_containers.sh
-PROBE_TIMEOUT = 30                 # outer cap on fast shared-infra probe
+PROBE_TIMEOUT = 60                 # outer cap on fast shared-infra probe
+                                   # — with 5-attempt retries (up to ~20s
+                                   # under transient flake), bump from 30 to
+                                   # 60 to leave headroom.
 
 FILES_TO_COPY = [
     "configs",

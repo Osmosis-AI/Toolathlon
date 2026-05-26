@@ -330,32 +330,43 @@ def check_kind_behavioral(instance_suffix: str) -> Tuple[bool, str]:
 # kind pod apply) can transiently fail under normal load — DB momentarily
 # locked, a packet drop, IMAP indexer pause, kubelet GC.  Reporting "infra
 # broken" on a single such hiccup is too aggressive because the caller
-# (ensure_shared_infra_ready) will then trigger a destructive repair
-# (deploy_containers.sh tears down the shared containers).  We retry
-# each check up to PROBE_CHECK_ATTEMPTS times with PROBE_CHECK_BACKOFF_S
-# between tries; a check is only declared failed if EVERY attempt failed.
+# (ensure_shared_infra_ready) may then trigger a destructive repair
+# (deploy_containers.sh tears down the shared containers).
+#
+# Real breakage SHOULD BE RARE, so we err on the side of more retries to
+# minimise false positives.  Each check tries up to PROBE_CHECK_ATTEMPTS=5
+# times with growing backoff (1s, 2s, 3s, 4s = 10s total wait worst case).
+# A check is only declared failed when every attempt fails.
+#
+# Worst-case total probe time on a transient-then-recover: ~1s × attempts_taken
+# + 1s..(2 + 3 + ... up to attempts_taken-1).  All checks run in parallel,
+# so this is bounded by the slowest single check.  Happy-path latency is
+# unchanged (single successful attempt).
 
-PROBE_CHECK_ATTEMPTS = 2
-PROBE_CHECK_BACKOFF_S = 1.0
+PROBE_CHECK_ATTEMPTS = 5
+PROBE_CHECK_BACKOFFS_S = [1.0, 2.0, 3.0, 4.0]  # delay BEFORE each retry
 
 
 def _with_retry(fn: Callable[[], Tuple[bool, str]]) -> Tuple[bool, str]:
-    """Run an individual check with retries on transient failure."""
+    """Run an individual check with retries on transient failure.
+
+    Up to PROBE_CHECK_ATTEMPTS attempts; the i-th retry waits
+    PROBE_CHECK_BACKOFFS_S[i-1] seconds before firing.
+    """
     last_ok, last_detail = False, "no attempts"
     for i in range(PROBE_CHECK_ATTEMPTS):
         if i > 0:
-            time.sleep(PROBE_CHECK_BACKOFF_S)
+            # PROBE_CHECK_BACKOFFS_S has PROBE_CHECK_ATTEMPTS-1 entries
+            time.sleep(PROBE_CHECK_BACKOFFS_S[min(i - 1, len(PROBE_CHECK_BACKOFFS_S) - 1)])
         try:
             last_ok, last_detail = fn()
         except Exception as e:
             last_ok, last_detail = False, f"unhandled exception: {e!r}"
         if last_ok:
             if i > 0:
-                # Note the recovery in the detail so operators can see
-                # transient flakes in the success log line.
                 last_detail = (last_detail or "") + f" (recovered after {i + 1} attempts)"
             return last_ok, last_detail
-    # All attempts failed
+    # Every attempt failed → genuine breakage
     return last_ok, last_detail + f" (after {PROBE_CHECK_ATTEMPTS} attempts)"
 
 
