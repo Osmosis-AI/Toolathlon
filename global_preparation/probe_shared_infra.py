@@ -57,17 +57,25 @@ sys.path.insert(0, str(PROJECT_ROOT))
 import yaml  # noqa: E402
 import httpx  # noqa: E402
 
-try:
-    from configs.token_key_session import all_token_key_session  # type: ignore
-except Exception as exc:  # pragma: no cover
-    print(f"✗ probe: cannot load configs.token_key_session ({exc!r})", file=sys.stderr)
-    sys.exit(2)
+# NOTE: we intentionally do NOT load configs.token_key_session here.
+# That file is a per-user placeholder reset per-task; using it for the
+# probe (which validates the SHARED canvas DB, not any task's owned slice)
+# leads to spurious 401s.  All probe credentials are hardcoded above
+# (CANVAS_PROBE_TOKEN, POSTE_PROBE_USER/PASS).
 
 
 # ── Probe-owned fixtures (do not change without coordinating with deploy_*) ──
 
 POSTE_PROBE_USER = "mcpposte_admin@mcp.com"
 POSTE_PROBE_PASS = "mcpposte"
+# Canvas admin token seeded by deployment/canvas/scripts/create_admin_accounts.py.
+# We use admin1 specifically because it's the most likely to remain valid across
+# any in-place Canvas state work tasks might do.  Hardcoded (not read from
+# ``configs.token_key_session``) because the global config file holds a
+# per-user PLACEHOLDER token meant to be overridden per task — using it for the
+# probe would mark Canvas as broken whenever the placeholder user happens not
+# to exist in the Canvas DB.
+CANVAS_PROBE_TOKEN = "mcpcanvasadmintoken1"
 KIND_PROBE_NAMESPACE = "probe-system"
 KIND_PROBE_IMAGE = "registry.k8s.io/pause:3.9"
 
@@ -97,11 +105,16 @@ def _resolve_ports() -> dict:
 # ── Individual checks ──────────────────────────────────────────────
 
 def check_canvas(port: int) -> Tuple[bool, str]:
-    """Admin-token self-lookup.  Confirms token + Canvas DB readable."""
-    token = getattr(all_token_key_session, "canvas_api_token", None)
-    if not token or token in ("", "XX"):
-        return False, "canvas_api_token not configured"
+    """Admin-token self-lookup.  Confirms token + Canvas DB readable.
+
+    Uses the seeded admin token directly rather than reading from
+    ``configs.token_key_session`` because that file is a per-user
+    placeholder that each task overrides — the placeholder user
+    typically doesn't exist in the Canvas DB so the probe would mark
+    Canvas as broken in fresh checkouts.
+    """
     url = f"http://localhost:{port}/api/v1/users/self"
+    token = CANVAS_PROBE_TOKEN
     try:
         with httpx.Client(timeout=8.0) as c:
             r = c.get(url, headers={"Authorization": f"Bearer {token}"})
