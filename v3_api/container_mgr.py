@@ -336,32 +336,54 @@ async def _run_setup(execution: ExecutionState) -> None:
             raise RuntimeError(f"Preprocess failed (exit {returncode}): {stdout[-2000:]}")
         log(f"Preprocess done for {task_id}")
 
-        # Step 4.5: Withhold grader-side artifacts from the agent
+        # Step 4.5: Lock down grader-side artifacts via Unix permissions
         # ----------------------------------------------------------
-        # The agent runs inside the container as root and has unrestricted
-        # filesystem access via the python_execute local tool.  If the
-        # task's ``evaluation/`` and ``groundtruth_workspace/`` dirs stay
-        # on disk during agent runtime, a sufficiently clever agent (or
-        # one with reward-hacking heuristics) can simply read the
-        # groundtruth file and emit a passing answer without doing the
-        # work.
+        # The agent's python_execute (and any subprocess it spawns) runs
+        # as UID 1000 — the gateway is launched below with ``-u 1000:1000``.
+        # We chmod 700 on the grader-side dirs (and chown them to root):
+        # owner=root, mode=700 means UID 1000 cannot read or list them.
+        # Preprocess has already run as root above (default exec user) and
+        # had full access — some tasks pre-compute groundtruth in there
+        # which is fine since preprocess is trusted.  ``run_eval`` later
+        # also runs as root (default exec user) so the grader keeps full
+        # access.
         #
-        # Both dirs are needed by preprocess (some tasks pre-compute
-        # groundtruth there), so we can only purge them AFTER preprocess
-        # finishes.  ``run_eval`` later re-materialises them from the
-        # host before invoking ``scripts.decoupled.container_eval``.
+        # Net effect: closes the reward-hacking surface (agent can't read
+        # groundtruth_workspace/* to short-circuit the task) without the
+        # fragility of removing + re-copying files at run boundaries.
         task_in_container = f"/workspace/tasks/finalpool/{task_id}"
-        purge_cmd = (
-            f"rm -rf {task_in_container}/evaluation "
-            f"{task_in_container}/groundtruth_workspace"
+        lockdown_cmd = (
+            # Root already owns these (came from docker cp).  Just remove
+            # group + other read/exec so UID 1000 is locked out.
+            f"chmod -R go-rwx {task_in_container}/evaluation "
+            f"{task_in_container}/groundtruth_workspace 2>/dev/null || true; "
+            # Make the dirs themselves mode 700 (so UID 1000 can't even
+            # list them) — chmod -R covers files but won't ensure dir
+            # mode is 700, so apply explicitly.
+            f"chmod 700 {task_in_container}/evaluation "
+            f"{task_in_container}/groundtruth_workspace 2>/dev/null || true; "
+            # The agent writes to /workspace/dumps (bind-mounted from host)
+            # and may need to mkdir .python_tmp etc.  Open it to UID 1000.
+            f"chown -R 1000:1000 /workspace/dumps; "
+            # /workspace/configs/.mcp-auth is bind-mounted too — token
+            # rotation needs to write here.
+            f"chown -R 1000:1000 /workspace/configs/.mcp-auth 2>/dev/null || true; "
+            # Make a HOME dir UID 1000 can write to (for uv/npm caches).
+            f"mkdir -p /home/agent && chown 1000:1000 /home/agent"
         )
         _run_cmd(
-            [runtime, "exec", container_name, "bash", "-c", purge_cmd],
+            [runtime, "exec", container_name, "bash", "-c", lockdown_cmd],
             timeout=30,
         )
-        log(f"Withheld evaluation/ + groundtruth_workspace/ for {task_id}")
+        log(f"Sandbox locked: eval/groundtruth root-only, gateway will run as UID 1000")
 
-        # Step 5: Start gateway
+        # Step 5: Start gateway as UID 1000 (the sandboxed user).
+        # The gateway is what the agent talks to over HTTP and what
+        # in turn spawns every MCP server + every python_execute
+        # subprocess.  Running it as non-root means none of those
+        # downstream subprocesses can read root-mode-700 files (eval/,
+        # groundtruth_workspace/, /root/, etc.).  We also set HOME so
+        # uv / npm caches go to a writeable place; PATH inherits.
         execution.setup_phase = "gateway_boot"
         gateway_cmd = (
             f"nohup uv run python -m scripts.decoupled.container_tool_gateway "
@@ -369,8 +391,13 @@ async def _run_setup(execution: ExecutionState) -> None:
             f"--host 0.0.0.0 --port {gateway_port} --debug "
             f"> /dev/null 2>&1 & echo $!"
         )
+        sandbox_exec_args = [
+            "--user", "1000:1000",
+            "--env", "HOME=/home/agent",
+            "--env", "DOCKER_API_VERSION=1.44",
+        ]
         result = _run_cmd(
-            [runtime, "exec"] + exec_env + [container_name, "bash", "-c", gateway_cmd]
+            [runtime, "exec"] + sandbox_exec_args + [container_name, "bash", "-c", gateway_cmd]
         )
         gateway_pid = result.stdout.strip()
         log(f"Gateway started (PID={gateway_pid}) on port {gateway_port}")
@@ -492,34 +519,19 @@ async def teardown_container(execution: ExecutionState) -> None:
 async def run_eval(execution: ExecutionState) -> GradeResponse:
     """Run ``container_eval.py`` inside the task container and parse results.
 
+    Eval runs as root (default exec user) so it can read the
+    grader-side dirs (``evaluation/`` + ``groundtruth_workspace/``)
+    that were locked to mode 700 / root after preprocess to keep them
+    out of the agent's reach (the gateway and its descendants run as
+    UID 1000 — see ``start_execution`` Step 4.5).
+
     Caller (router) is responsible for calling ``manager.cleanup_execution``
     after grading returns (success or failure) — that's the contract that
     makes ``/grade`` terminal.
     """
     runtime = _get_container_runtime()
     container = execution.container_name
-    task_id = execution.task_id
     log(f"Running evaluation for execution {execution.execution_id}")
-
-    # Re-materialise the grader-side dirs that were withheld from the
-    # agent at the end of preprocess (see start_execution Step 4.5).
-    # We copy from the host now so the eval has access to the
-    # groundtruth + grading code that the agent could not see.
-    task_source = PROJECT_ROOT / "tasks" / "finalpool" / task_id
-    target_task_dir = f"/workspace/tasks/finalpool/{task_id}"
-    for sub in ("evaluation", "groundtruth_workspace"):
-        src = task_source / sub
-        if not src.exists():
-            continue
-        _run_cmd(
-            [runtime, "exec", container, "mkdir", "-p", f"{target_task_dir}/{sub}"],
-            timeout=15,
-        )
-        _run_cmd(
-            [runtime, "cp", f"{src}/.", f"{container}:{target_task_dir}/{sub}/"],
-            timeout=120,
-        )
-    log(f"Restored evaluation + groundtruth for {execution.execution_id}")
 
     eval_cmd = (
         "uv run python -m scripts.decoupled.container_eval "
