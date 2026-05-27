@@ -17,9 +17,12 @@ params:
     - "utils.local_servers.arxiv_local_wrapper"
     - "--storage-path"
     - "${agent_workspace}/arxiv_local_storage"
-  # env:
-  #   HTTPS_PROXY: "${config.proxy}"
-  #   HTTP_PROXY: "${config.proxy}"
+  env:
+    # Wrapper module lives at /workspace/utils/local_servers/arxiv_local_wrapper.py
+    # (copied in by FILES_TO_COPY).  Since cwd is the agent workspace, we
+    # need to add /workspace to sys.path so ``python -m utils.local_servers...``
+    # resolves.
+    PYTHONPATH: "/workspace"
   cwd: "${agent_workspace}"
 client_session_timeout_seconds: 60
 cache_tools_list: true
