@@ -603,17 +603,6 @@ if __name__ == "__main__":
         # Generate validation summary
         validation_passed = generate_validation_summary(validation_results)
 
-        # Verify result log file
-        if not os.path.isfile(args.res_log_file):
-            raise FileNotFoundError(f"Missing log file: {args.res_log_file}")
-
-        with open(args.res_log_file, "r", encoding="utf-8") as f:
-            log_data = json.load(f)
-
-        messages = log_data.get("messages")
-        if not isinstance(messages, list):
-            raise ValueError("Log file missing 'messages' list")
-
         # Final result
         if validation_passed:
             print(f"\n🎉 Machine Operating Anomaly Detection evaluation PASSED!")

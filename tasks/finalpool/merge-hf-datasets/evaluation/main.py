@@ -8,12 +8,33 @@ def write_json(data, file_path):
     with open(file_path, "w") as f:
         json.dump(data, f, indent=4)
 
+# For property/argument ``type`` fields, recognise common cross-language
+# spellings as equivalent.  XLAM uses Python-style names ("str", "int"),
+# the unified-format spec / glaive use JSON Schema names ("string",
+# "integer"), and ToolACE uses "dict" instead of "object" for container
+# parameters.  All map to the same JSON Schema canonical form here.
+_TYPE_ALIASES = {
+    "str": "string", "string": "string",
+    "int": "integer", "integer": "integer",
+    "float": "number", "number": "number",
+    "bool": "boolean", "boolean": "boolean",
+    "list": "array", "array": "array",
+    "dict": "object", "object": "object",
+    "none": "null", "null": "null",
+}
+
+
 def normalize_value_for_comparison(value, path=""):
     """Normalize value for comparison, handling known acceptable differences."""
     if isinstance(value, str):
-        # Normalize tool argument type
-        if path.endswith(".type") and value == "dict":
-            return "object"
+        # Type-name aliasing: XLAM uses "str"/"int", spec uses "string"/
+        # "integer", ToolACE uses "dict" for "object".  Canonicalise so
+        # identical schemas compare equal regardless of which spelling
+        # the source dataset (or the agent's conversion) chose.
+        if path.endswith(".type"):
+            canonical = _TYPE_ALIASES.get(value.strip().lower())
+            if canonical is not None:
+                return canonical
         # Normalize JSON string values
         try:
             parsed = json.loads(value.strip())
