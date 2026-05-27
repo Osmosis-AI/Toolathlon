@@ -12,6 +12,39 @@ echo "==========================================================================
 
 sleep 5
 
+# Read `podman_or_docker` from global_configs.py
+podman_or_docker=$(uv run python -c "import sys; sys.path.append('configs'); from global_configs import global_configs; print(global_configs.podman_or_docker)" 2>/dev/null || echo "docker")
+
+# Read instance_suffix from ports_config.yaml
+instance_suffix=$(uv run python -c "
+import yaml
+try:
+    with open('configs/ports_config.yaml', 'r') as f:
+        config = yaml.safe_load(f)
+        print(config.get('instance_suffix', ''))
+except Exception:
+    print('')
+" 2>/dev/null || echo "")
+
+echo "============================================================================================="
+echo "Stopping existing Docker/Podman services cleanly..."
+echo "============================================================================================="
+
+bash deployment/poste/scripts/setup.sh stop "$poste_configure_dovecot" || true
+bash deployment/woocommerce/scripts/setup.sh stop || true
+bash deployment/canvas/scripts/setup.sh stop || true
+
+if [ "$podman_or_docker" = "docker" ]; then
+    docker rm -f "poste${instance_suffix}" "woo-wp${instance_suffix}" "woo-db${instance_suffix}" "canvas-docker${instance_suffix}" 2>/dev/null || true
+    docker network rm "woo-net${instance_suffix}" 2>/dev/null || true
+elif [ "$podman_or_docker" = "podman" ]; then
+    podman rm -f "poste${instance_suffix}" "woo-wp${instance_suffix}" "woo-db${instance_suffix}" "canvas-docker${instance_suffix}" 2>/dev/null || true
+    podman network rm "woo-net${instance_suffix}" 2>/dev/null || true
+    podman pod rm -f "woo-pod${instance_suffix}" 2>/dev/null || true
+fi
+
+sleep 2
+
 # Kill processes occupying required ports
 echo "============================================================================================="
 echo "Checking and killing processes on required ports..."
@@ -21,18 +54,33 @@ echo "==========================================================================
 REQUIRED_PORTS=(10001 20001 10005 2525 1143 1587 10003 30123 30124 30137)
 
 for port in "${REQUIRED_PORTS[@]}"; do
-    # Check if port is in use
     if lsof -i :$port -t >/dev/null 2>&1; then
-        echo "Port $port is in use. Killing process(es)..."
-        # Get PIDs and kill them
+        echo "Port $port is in use. Checking process(es)..."
         pids=$(lsof -i :$port -t)
+
         for pid in $pids; do
-            echo "  Killing PID $pid on port $port"
-            kill -9 $pid 2>/dev/null || true
+            process_name=$(ps -p "$pid" -o comm= 2>/dev/null || true)
+            process_args=$(ps -p "$pid" -o args= 2>/dev/null || true)
+
+            case "$process_name:$process_args" in
+                *docker-proxy*|*com.docker.backend*|*podman*)
+                    echo "  Skipping Docker/Podman-managed process PID $pid ($process_name). Clean containers instead."
+                    ;;
+                *)
+                    echo "  Killing non-Docker PID $pid on port $port ($process_name)"
+                    kill -9 "$pid" 2>/dev/null || true
+                    ;;
+            esac
         done
-        # Wait a moment for the port to be released
+
         sleep 1
-        echo "  Port $port cleared"
+
+        if lsof -i :$port -t >/dev/null 2>&1; then
+            echo "  Warning: port $port is still in use after cleanup"
+            lsof -i :$port || true
+        else
+            echo "  Port $port cleared"
+        fi
     else
         echo "Port $port is free"
     fi
