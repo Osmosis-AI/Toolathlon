@@ -132,6 +132,7 @@ class ExecutionState:
     gateway_port: int
     gateway_url: str
     output_folder: str
+    task_stash_dir: Optional[str] = None  # host-side stash of withheld preprocess/eval/groundtruth dirs
     lock_keys: List[str] = field(default_factory=list)
     status: str = "starting"                # starting | ready | grading | stopping
     setup_status: str = "starting"          # starting | ready
