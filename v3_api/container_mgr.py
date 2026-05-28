@@ -517,11 +517,14 @@ async def teardown_container(execution: ExecutionState) -> None:
 async def run_eval(execution: ExecutionState) -> GradeResponse:
     """Run ``container_eval.py`` inside the task container and parse results.
 
-    Restores the ``evaluation/`` + ``groundtruth_workspace/`` dirs from
-    the host-side stash (created in ``start_execution`` Step 4.5) so
-    the grader has access to artifacts the agent could not see during
-    its tool-call phase.  ``preprocess/`` is intentionally not
-    restored — it's not needed for grading.
+    Restores ``preprocess/``, ``evaluation/`` and ``groundtruth_workspace/``
+    from the host-side stash (created in ``start_execution`` Step 4.5)
+    so the grader has access to artifacts the agent could not see during
+    its tool-call phase.  ``preprocess/`` has to come back too — several
+    tasks' graders import helper modules from there
+    (woocommerce-update-cover/preprocess/woocommerce_client.py is the
+    canonical case), and they fail with ``ImportError: No module named
+    'woocommerce_client'`` if the directory is still absent at grade time.
 
     Caller (router) is responsible for calling ``manager.cleanup_execution``
     after grading returns (success or failure) — that's the contract that
@@ -534,11 +537,12 @@ async def run_eval(execution: ExecutionState) -> GradeResponse:
 
     # Re-materialise grader-side dirs from the host stash.  Tolerant
     # of missing subdirs — many tasks have no groundtruth_workspace/
-    # (grader checks live external state instead).
+    # or preprocess/.
     stash_dir = Path(execution.task_stash_dir) if execution.task_stash_dir else None
     if stash_dir and stash_dir.is_dir():
         target_task_dir = f"/workspace/tasks/finalpool/{task_id}"
-        for sub in ("evaluation", "groundtruth_workspace"):
+        restored = []
+        for sub in ("preprocess", "evaluation", "groundtruth_workspace"):
             src = stash_dir / sub
             if not src.is_dir():
                 continue
@@ -550,7 +554,8 @@ async def run_eval(execution: ExecutionState) -> GradeResponse:
                 [runtime, "cp", f"{str(src)}/.", f"{container}:{target_task_dir}/{sub}/"],
                 timeout=120,
             )
-        log(f"Restored evaluation+groundtruth for {execution.execution_id} from {stash_dir}")
+            restored.append(sub)
+        log(f"Restored {'+'.join(restored)} for {execution.execution_id} from {stash_dir}")
 
     eval_cmd = (
         "uv run python -m scripts.decoupled.container_eval "
