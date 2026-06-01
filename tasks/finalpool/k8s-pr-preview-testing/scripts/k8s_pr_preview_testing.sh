@@ -8,7 +8,23 @@ PORT=${1:-30123}  # Default port is 30123, can be overridden by the first argume
 k8sconfig_path_dir=${agent_workspace}/k8s_configs
 backup_k8sconfig_path_dir=${SCRIPT_DIR}/../k8s_configs
 mkdir -p $backup_k8sconfig_path_dir
-cluster_name="cluster-pr-preview"
+# Suffix the kind cluster name with the Toolathlon instance_suffix so that
+# parallel instances on the same host (which share the docker/kind daemon
+# via /var/run/docker.sock) don't stomp on each other's clusters during
+# preprocess.  Empty suffix (single-instance setup) → "cluster-pr-preview"
+# (backward-compatible).
+_ports_cfg="$SCRIPT_DIR/../../../../configs/ports_config.yaml"
+_instance_suffix=""
+if [ -f "$_ports_cfg" ]; then
+  _instance_suffix=$(grep -E "^instance_suffix:" "$_ports_cfg" | sed -E 's/.*instance_suffix:[[:space:]]*"([^"]*)".*/\1/')
+fi
+# cluster_name: host-unique kind cluster id, suffixed with the
+# Toolathlon instance_suffix so parallel instances on the same host
+# don't stomp on each other's clusters during preprocess.  The
+# kubeconfig file is also written using this exact name; grader and
+# token_key_session.py derive the same suffix from the same
+# ports_config.yaml so the path matches.
+cluster_name="cluster-pr-preview${_instance_suffix}"
 
 podman_or_docker=$(uv run python -c "import sys; sys.path.append('configs'); from global_configs import global_configs; print(global_configs.podman_or_docker)")
 
@@ -56,6 +72,69 @@ cleanup_existing_cluster() {
     log_info "Cluster ${cluster_name} has been deleted"
   else
     log_info "No existing cluster ${cluster_name} found"
+  fi
+}
+
+# Remove orphan host containers that a prior agent may have spawned via
+# the shared /var/run/docker.sock — typically a socat forwarder
+# satisfying the task's "long-term basis" requirement of exposing the
+# kind NodePort on host:${PORT}.  These containers live on the host
+# (not in the agent's task container), so v3's per-task cleanup
+# doesn't see them.  If left behind, they hold ${PORT} and block the
+# next ``kind create cluster`` with "port already allocated".
+#
+# Three complementary passes so we catch all common agent shapes:
+#   1. Known name pattern — agents typically name forwarders after the
+#      app under test ("simple-shopping-*").
+#   2. Port-holding via -p mapping — any container with a declared
+#      port mapping for host port ${PORT}.
+#   3. Host-network containers whose command references ${PORT} — the
+#      publish filter misses these because they bind the host's port
+#      directly without docker port mapping.
+# Final ``ss`` check surfaces any non-docker holder we couldn't reach.
+cleanup_agent_host_artifacts() {
+  log_info "Cleaning up agent-spawned host artifacts (orphans from prior runs)..."
+
+  # Pass 1: known name pattern
+  local named
+  named=$(docker ps -aq --filter "name=simple-shopping-" 2>/dev/null)
+  if [ -n "$named" ]; then
+    log_info "  Removing simple-shopping-* containers:"
+    docker rm -f $named 2>&1 | sed 's/^/    /' || true
+  fi
+
+  # Pass 2: containers with declared -p port mapping for ${PORT}
+  local port_holders
+  port_holders=$(docker ps -q --filter "publish=${PORT}" 2>/dev/null)
+  if [ -n "$port_holders" ]; then
+    log_info "  Removing containers with -p mapping on ${PORT}:"
+    docker rm -f $port_holders 2>&1 | sed 's/^/    /' || true
+  fi
+
+  # Pass 3: --network=host containers whose command references ${PORT}.
+  local host_net_listeners=""
+  local cid netmode cmd
+  for cid in $(docker ps -q 2>/dev/null); do
+    netmode=$(docker inspect "$cid" --format '{{.HostConfig.NetworkMode}}' 2>/dev/null)
+    if [ "$netmode" = "host" ]; then
+      cmd=$(docker inspect "$cid" --format '{{json .Config.Cmd}} {{json .Args}}' 2>/dev/null)
+      if echo "$cmd" | grep -qw "${PORT}"; then
+        host_net_listeners="$host_net_listeners $cid"
+      fi
+    fi
+  done
+  if [ -n "$host_net_listeners" ]; then
+    log_info "  Removing --network=host containers referencing port ${PORT}:"
+    docker rm -f $host_net_listeners 2>&1 | sed 's/^/    /' || true
+  fi
+
+  if ss -tlnp 2>/dev/null | grep -q ":${PORT} "; then
+    log_warning "  Host port ${PORT} still bound after cleanup (non-docker process?):"
+    ss -tlnp 2>/dev/null | grep ":${PORT} " | sed 's/^/    /' || true
+  fi
+
+  if [ -z "$named" ] && [ -z "$port_holders" ] && [ -z "$host_net_listeners" ]; then
+    log_info "  No orphan containers found on host port ${PORT}"
   fi
 }
 
@@ -156,6 +235,9 @@ start_operation() {
   log_info "========== Start Kind cluster deployment for PR Preview Testing =========="
   cleanup_existing_cluster
   cleanup_config_files
+  # Must run BEFORE create_cluster — otherwise an orphan forwarder/etc
+  # still owns host port ${PORT} and the kind create step fails.
+  cleanup_agent_host_artifacts
   show_inotify_status
   configpath="$k8sconfig_path_dir/${cluster_name}-config.yaml"
   backup_configpath="$backup_k8sconfig_path_dir/${cluster_name}-config.yaml"
@@ -163,8 +245,17 @@ start_operation() {
   echo ""
   log_info "========== Processing cluster ${cluster_name} =========="
 
-  create_cluster "${cluster_name}" "$configpath"
-  verify_cluster "${cluster_name}" "$configpath"
+  # Propagate exit codes — a silent create/verify failure used to leave
+  # preprocess reporting "done" while no cluster actually existed,
+  # which then deadlocked the k8s MCP server at gateway_boot.
+  if ! create_cluster "${cluster_name}" "$configpath"; then
+    log_error "Aborting start_operation: kind create cluster failed for ${cluster_name}"
+    return 1
+  fi
+  if ! verify_cluster "${cluster_name}" "$configpath"; then
+    log_error "Aborting start_operation: cluster verification failed for ${cluster_name}"
+    return 1
+  fi
   log_info "========== Cluster ready for deployment =========="
   log_info "KUBECONFIG is set to: $configpath"
   log_info "You can now deploy your services using:"
@@ -194,8 +285,8 @@ start_operation() {
 main() {
   local operation=${2:-start}
   case "$operation" in
-    "start") start_operation ;;
-    "stop") stop_operation ;;
+    "start") start_operation || exit 1 ;;
+    "stop")  stop_operation  || exit 1 ;;
     *)
       log_error "Invalid operation: $operation"
       show_usage

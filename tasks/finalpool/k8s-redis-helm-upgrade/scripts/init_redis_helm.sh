@@ -8,7 +8,17 @@ k8sconfig_path_dir=${agent_workspace}/k8s_configs
 # backup_k8sconfig_path_dir=deployment/k8s/configs
 backup_k8sconfig_path_dir=${SCRIPT_DIR}/../k8s_configs
 mkdir -p $backup_k8sconfig_path_dir
-cluster_name="cluster-redis-helm"
+# Suffix the kind cluster name with the Toolathlon instance_suffix so
+# parallel instances on the same host don't stomp on each other's
+# clusters during preprocess.  Empty suffix → "cluster-redis-helm"
+# (backward-compatible).  Grader and token_key_session.py derive the
+# same suffix from the same ports_config.yaml so paths match.
+_ports_cfg="$SCRIPT_DIR/../../../../configs/ports_config.yaml"
+_instance_suffix=""
+if [ -f "$_ports_cfg" ]; then
+  _instance_suffix=$(grep -E "^instance_suffix:" "$_ports_cfg" | sed -E 's/.*instance_suffix:[[:space:]]*"([^"]*)".*/\1/')
+fi
+cluster_name="cluster-redis-helm${_instance_suffix}"
 resource_yaml="${agent_workspace}/k8s_configs/redis_helm_namespace.yaml"
 helm_repo_name="bitnami"
 helm_repo_url="https://charts.bitnami.com/bitnami"

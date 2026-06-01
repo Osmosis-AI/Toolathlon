@@ -8,7 +8,23 @@ SCRIPT_DIR=$(dirname "$0")
 k8sconfig_path_dir=${agent_workspace}/k8s_configs
 backup_k8sconfig_path_dir=${SCRIPT_DIR}/../k8s_configs
 mkdir -p $backup_k8sconfig_path_dir
-cluster_name="cluster-mysql"
+# Suffix the kind cluster name with the Toolathlon instance_suffix so that
+# parallel instances on the same host (which share the docker/kind daemon
+# via /var/run/docker.sock) don't stomp on each other's clusters during
+# preprocess.  Empty suffix (single-instance setup) → "cluster-mysql"
+# (backward-compatible).
+_ports_cfg="$SCRIPT_DIR/../../../../configs/ports_config.yaml"
+_instance_suffix=""
+if [ -f "$_ports_cfg" ]; then
+  _instance_suffix=$(grep -E "^instance_suffix:" "$_ports_cfg" | sed -E 's/.*instance_suffix:[[:space:]]*"([^"]*)".*/\1/')
+fi
+# cluster_name: host-unique kind cluster id, suffixed with the
+# Toolathlon instance_suffix so parallel instances on the same host
+# don't stomp on each other's clusters during preprocess.  The
+# kubeconfig file is also written using this exact name; grader and
+# token_key_session.py derive the same suffix from the same
+# ports_config.yaml so the path matches.
+cluster_name="cluster-mysql${_instance_suffix}"
 
 resource_yaml="${SCRIPT_DIR}/../k8s_resources/k8s_mysql.yaml"
 dataset_path_dir="$SCRIPT_DIR/../data"
@@ -41,6 +57,79 @@ cleanup_existing_cluster() {
     log_info "Cluster ${cluster_name} has been deleted"
   else
     log_info "No existing cluster ${cluster_name} found"
+  fi
+}
+
+# Port the agent is asked to keep forwarded "even after you finish the
+# whole task" — see docs/task.md.  The grader does:
+#   1. ps aux | grep "kubectl.*port-forward.*30124"
+#   2. socket.connect(('localhost', 30124))
+#   3. pymysql.connect(host='localhost', port=30124, ...)
+# so the agent has an incentive to spawn a long-lived listener.  Since
+# the task container runs with --network=host, a kubectl port-forward
+# inside the container or a socat container on the host both bind the
+# same host:30124.  Agent solutions of the latter kind survive across
+# executions and would block the next run's port-forward attempt.
+AGENT_PORT=30124
+
+# Remove orphan host containers that a prior agent may have spawned via
+# the shared /var/run/docker.sock (e.g. a socat container binding host
+# port ${AGENT_PORT} to keep the MySQL port-forward "alive past the
+# task").  These containers live on the host (not in the agent's task
+# container), so v3's per-task cleanup doesn't see them.  Left
+# behind, they hold ${AGENT_PORT} and would block the next agent's
+# kubectl port-forward setup.
+#
+# Unlike pr-preview, k8s-mysql has no fixed naming convention for the
+# agent's forwarder, so we use port-holding as the only signal.  This
+# is safe because nothing this script owns has been started yet (we run
+# before create_cluster), so any holder of host:${AGENT_PORT} is by
+# definition stale.
+cleanup_agent_host_artifacts() {
+  log_info "Cleaning up agent-spawned host artifacts (orphans from prior runs)..."
+
+  # Pass 1: containers with declared -p port mapping for ${AGENT_PORT}
+  local port_holders
+  port_holders=$(docker ps -q --filter "publish=${AGENT_PORT}" 2>/dev/null)
+  if [ -n "$port_holders" ]; then
+    log_info "  Removing containers with -p mapping on ${AGENT_PORT}:"
+    docker rm -f $port_holders 2>&1 | sed 's/^/    /' || true
+  fi
+
+  # Pass 2: containers running with --network=host whose command-line
+  # references ${AGENT_PORT}.  publish-filter doesn't see these because
+  # host-net containers have no declared port mapping — they just bind
+  # the host's port directly.  We restrict to host-net (instead of
+  # scanning every container) to keep false-positives away from
+  # unrelated services that happen to mention the port in their config.
+  local host_net_listeners=""
+  local cid
+  for cid in $(docker ps -q 2>/dev/null); do
+    local netmode
+    netmode=$(docker inspect "$cid" --format '{{.HostConfig.NetworkMode}}' 2>/dev/null)
+    if [ "$netmode" = "host" ]; then
+      local cmd
+      cmd=$(docker inspect "$cid" --format '{{json .Config.Cmd}} {{json .Args}}' 2>/dev/null)
+      if echo "$cmd" | grep -qw "${AGENT_PORT}"; then
+        host_net_listeners="$host_net_listeners $cid"
+      fi
+    fi
+  done
+  if [ -n "$host_net_listeners" ]; then
+    log_info "  Removing --network=host containers referencing port ${AGENT_PORT}:"
+    docker rm -f $host_net_listeners 2>&1 | sed 's/^/    /' || true
+  fi
+
+  # Final check — if the port is still held by something we couldn't
+  # identify (a host process outside docker, etc.), surface it so the
+  # next failure is at least diagnosable rather than mysterious.
+  if ss -tlnp 2>/dev/null | grep -q ":${AGENT_PORT} "; then
+    log_warning "  Host port ${AGENT_PORT} still bound after cleanup (non-docker process?):"
+    ss -tlnp 2>/dev/null | grep ":${AGENT_PORT} " | sed 's/^/    /' || true
+  fi
+
+  if [ -z "$port_holders" ] && [ -z "$host_net_listeners" ]; then
+    log_info "  No orphan containers found on host port ${AGENT_PORT}"
   fi
 }
 
@@ -329,24 +418,46 @@ start_operation() {
   log_info "========== Start Kind cluster deployment =========="
   cleanup_existing_cluster
   cleanup_config_files
+  # Must run BEFORE create_cluster — otherwise an orphan forwarder
+  # still owns host port ${AGENT_PORT} from a prior agent's solution
+  # and the agent's next port-forward attempt would fail.
+  cleanup_agent_host_artifacts
   show_inotify_status
   configpath="$k8sconfig_path_dir/${cluster_name}-config.yaml"
 
   echo ""
   log_info "========== Processing cluster ${cluster_name} =========="
 
-  create_cluster "${cluster_name}" "$configpath"
-  verify_cluster "${cluster_name}" "$configpath"
-  apply_resources "$configpath"
+  # Propagate exit codes — a silent failure here used to leave preprocess
+  # reporting success while the cluster didn't exist, which then
+  # deadlocked the k8s MCP server at gateway_boot.
+  if ! create_cluster "${cluster_name}" "$configpath"; then
+    log_error "Aborting start_operation: kind create cluster failed for ${cluster_name}"
+    return 1
+  fi
+  if ! verify_cluster "${cluster_name}" "$configpath"; then
+    log_error "Aborting start_operation: cluster verification failed for ${cluster_name}"
+    return 1
+  fi
+  if ! apply_resources "$configpath"; then
+    log_error "Aborting start_operation: kubectl apply failed"
+    return 1
+  fi
 
   log_info "========== Initializing MySQL-f1 database =========="
   export MYSQL_ROOT_PASSWORD="mcpbench0606"   # Or load securely as needed
 
   # Ensure MySQL StatefulSet is ready
-  kubectl --kubeconfig="$configpath" -n data rollout status statefulset/mysql-f1
+  if ! kubectl --kubeconfig="$configpath" -n data rollout status statefulset/mysql-f1; then
+    log_error "Aborting start_operation: mysql-f1 rollout did not become ready"
+    return 1
+  fi
 
   # Ensure csv-loader Pod is ready
-  kubectl --kubeconfig="$configpath" -n data wait --for=condition=Ready pod/csv-loader --timeout=120s
+  if ! kubectl --kubeconfig="$configpath" -n data wait --for=condition=Ready pod/csv-loader --timeout=120s; then
+    log_error "Aborting start_operation: csv-loader pod did not become ready"
+    return 1
+  fi
 
   # Copy CSV files to csv-loader
   kubectl --kubeconfig="$configpath" -n data cp "$dataset_path_dir/f1/." csv-loader:/csv
@@ -388,10 +499,10 @@ main() {
 
   case "$operation" in
     "start")
-      start_operation
+      start_operation || exit 1
       ;;
     "stop")
-      stop_operation
+      stop_operation || exit 1
       ;;
     *)
       log_error "Invalid operation: $operation"

@@ -9,7 +9,28 @@ FOLDER_ID_FILE = os.path.join(os.path.dirname(__file__), "..", "files", "folder_
 with open(FOLDER_ID_FILE, "r") as f: FOLDER_ID = f.read().strip()
 CREDENTIALS_FILE = "configs/google_credentials.json"
 task_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-KUBECONFIG_PATH = os.path.join(task_dir, "k8s_configs", "cluster-safety-audit-config.yaml")
+
+
+def _instance_suffix() -> str:
+    """Read instance_suffix from configs/ports_config.yaml so the kubeconfig
+    filename matches what the preprocess shell script wrote.  See the
+    matching helper in token_key_session.py for the full rationale."""
+    cfg_path = os.path.join(task_dir, "..", "..", "..", "configs", "ports_config.yaml")
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("instance_suffix:"):
+                    val = line.split(":", 1)[1].strip()
+                    return val.strip('"').strip("'")
+    except OSError:
+        pass
+    return ""
+
+
+KUBECONFIG_PATH = os.path.join(
+    task_dir, "k8s_configs", f"cluster-safety-audit{_instance_suffix()}-config.yaml"
+)
 
 if __name__ == "__main__":
     parser = ArgumentParser()

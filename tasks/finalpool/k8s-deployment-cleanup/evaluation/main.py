@@ -35,9 +35,27 @@ def run_cmd(cmd: List[str], suppress_error_log: bool = False) -> Tuple[int, str,
         return 1, "", str(e)
 
 
+def _instance_suffix(task_dir: str) -> str:
+    """Read instance_suffix from configs/ports_config.yaml so the kubeconfig
+    filename matches what the preprocess shell script wrote.  See the
+    matching helper in token_key_session.py for the full rationale."""
+    cfg_path = os.path.join(task_dir, "..", "..", "..", "configs", "ports_config.yaml")
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("instance_suffix:"):
+                    val = line.split(":", 1)[1].strip()
+                    return val.strip('"').strip("'")
+    except OSError:
+        pass
+    return ""
+
+
 def detect_kubeconfig(agent_workspace: str, task_dir: str) -> str:
-    cand1 = os.path.join(task_dir, "k8s_configs", "cluster-cleanup-config.yaml")
-    cand2 = os.path.join(agent_workspace, "k8s_configs", "cluster-cleanup-config.yaml")
+    fname = f"cluster-cleanup{_instance_suffix(task_dir)}-config.yaml"
+    cand1 = os.path.join(task_dir, "k8s_configs", fname)
+    cand2 = os.path.join(agent_workspace, "k8s_configs", fname)
     debug(f"Trying kubeconfig candidates: {cand1} | {cand2}")
     if os.path.exists(cand1):
         debug(f"Using kubeconfig: {cand1}")

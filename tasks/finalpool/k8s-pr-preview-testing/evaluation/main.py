@@ -13,7 +13,28 @@ from utils.general.helper import normalize_str
 # ORIGINAL_HASH="ca1e55249730750ec2efc8f2a42ff6b905beceec"
 NAMESPACE="pr-preview-123"
 task_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-K8S_CONFIG_PATH=os.path.join(task_dir, "k8s_configs", "cluster-pr-preview-config.yaml")
+
+
+def _instance_suffix() -> str:
+    """Read instance_suffix from configs/ports_config.yaml so the kubeconfig
+    filename matches what the preprocess script wrote.  See the matching
+    helper in token_key_session.py for the full rationale."""
+    cfg_path = os.path.join(task_dir, "..", "..", "..", "configs", "ports_config.yaml")
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("instance_suffix:"):
+                    val = line.split(":", 1)[1].strip()
+                    return val.strip('"').strip("'")
+    except OSError:
+        pass
+    return ""
+
+
+K8S_CONFIG_PATH = os.path.join(
+    task_dir, "k8s_configs", f"cluster-pr-preview{_instance_suffix()}-config.yaml"
+)
 
 def parse_markdown_table(table_content):
     """Parse markdown table into structured data"""

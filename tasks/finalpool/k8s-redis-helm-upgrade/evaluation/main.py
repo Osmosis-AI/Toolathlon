@@ -7,6 +7,23 @@ from typing import Dict, Any
 
 TARGET_VERSION = "22.0.0"
 
+
+def _instance_suffix(task_dir: str) -> str:
+    """Read instance_suffix from configs/ports_config.yaml so the kubeconfig
+    filename matches what the preprocess shell script wrote.  See the
+    matching helper in token_key_session.py for the full rationale."""
+    cfg_path = os.path.join(task_dir, "..", "..", "..", "configs", "ports_config.yaml")
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("instance_suffix:"):
+                    val = line.split(":", 1)[1].strip()
+                    return val.strip('"').strip("'")
+    except OSError:
+        pass
+    return ""
+
 def check_helm_upgrade(task_dir: str) -> Dict[str, Any]:
     """
     Check if Redis Helm chart was successfully upgraded
@@ -37,7 +54,7 @@ def check_helm_upgrade(task_dir: str) -> Dict[str, Any]:
     
     try:
         # Check if kubeconfig exists
-        kubeconfig_path = os.path.join(task_dir, "k8s_configs", "cluster-redis-helm-config.yaml")
+        kubeconfig_path = os.path.join(task_dir, "k8s_configs", f"cluster-redis-helm{_instance_suffix(task_dir)}-config.yaml")
         if not os.path.exists(kubeconfig_path):
             return {"error": "Kubeconfig not found"}
         

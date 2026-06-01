@@ -8,7 +8,17 @@ SCRIPT_DIR=$(dirname "$0")
 k8sconfig_path_dir=${agent_workspace}/k8s_configs
 backup_k8sconfig_path_dir=${SCRIPT_DIR}/../k8s_configs
 mkdir -p $backup_k8sconfig_path_dir
-cluster_name="cluster-safety-audit"
+# Suffix the kind cluster name with the Toolathlon instance_suffix so
+# parallel instances on the same host don't stomp on each other's
+# clusters during preprocess.  Empty suffix → "cluster-safety-audit"
+# (backward-compatible).  Grader and token_key_session.py derive the
+# same suffix from the same ports_config.yaml so paths match.
+_ports_cfg="$SCRIPT_DIR/../../../../configs/ports_config.yaml"
+_instance_suffix=""
+if [ -f "$_ports_cfg" ]; then
+  _instance_suffix=$(grep -E "^instance_suffix:" "$_ports_cfg" | sed -E 's/.*instance_suffix:[[:space:]]*"([^"]*)".*/\1/')
+fi
+cluster_name="cluster-safety-audit${_instance_suffix}"
 resource_yaml="${SCRIPT_DIR}/../k8s_resources/k8s_safety_audit.yaml"
 
 podman_or_docker=$(uv run python -c "import sys; sys.path.append('configs'); from global_configs import global_configs; print(global_configs.podman_or_docker)")
