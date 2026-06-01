@@ -77,7 +77,12 @@ def check_local(agent_workspace, groundtruth_workspace):
             "Toefl_accepted":"Yes",
             "Toefl_min_score":100,
             "Ielts_accepted":"Yes",
-            "Ielts_min_score":7.5,
+            # CMU SCS Graduate Admissions
+            # (https://www.cs.cmu.edu/academics/graduate-admissions) states
+            # "An IELTS score of 7 is equivalent to a TOEFL score of 100",
+            # making 7 the effective minimum.  Previously hardcoded as 7.5
+            # which doesn't appear in any official CMU source.
+            "Ielts_min_score":7,
             "Application_fee":100,
             "Application_ddl":"2025-12-10T15:00:00-05:00"},
         {"University":['harvard'],
@@ -131,8 +136,16 @@ def check_local(agent_workspace, groundtruth_workspace):
                     # if not any(compare_element(agent_element, element) for element in groundtruth_element):
                         # return False, f"Element mismatch at index {row_idx}[{col}]: expected '{groundtruth_element}', got '{agent_element}'"
                 else:
-                    if not compare_element(agent_element, groundtruth_element):
-                        return False, f"Element mismatch at index {row_idx}[{col}]: expected '{groundtruth_element}', got '{agent_element}'"
+                    # ``compare_element`` returns a ``(is_different, err_msg)``
+                    # tuple.  Any non-empty tuple is truthy in Python, so
+                    # ``if not compare_element(...)`` was ALWAYS False — the
+                    # failure branch never fired and scalar mismatches
+                    # silently passed (e.g. agent IELTS=7 vs GT 7.5 would not
+                    # trigger an error).  Unpack the tuple explicitly so the
+                    # mismatch flag and the actual diff message are used.
+                    is_different, diff_msg = compare_element(agent_element, groundtruth_element)
+                    if is_different:
+                        return False, f"Element mismatch at index {row_idx}[{col}]: expected '{groundtruth_element}', got '{agent_element}' ({diff_msg})"
     
     return True, "All university language requirements verified successfully!"
         

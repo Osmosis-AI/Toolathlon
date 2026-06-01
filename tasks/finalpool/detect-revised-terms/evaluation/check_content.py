@@ -24,22 +24,32 @@ def normalize_legal_clause(clause_text):
 
 def normalize_content_text(content_text):
     """
-    标准化法律条文内容，去除末尾的标点符号差异 (Normalize legal clause content by removing punctuation differences at the end)
-    
-    例如： (Examples:)
-    - "预告登记失效。" -> "预告登记失效"
-    - "预告登记失效" -> "预告登记失效"
+    Normalize legal clause content by stripping punctuation/whitespace at
+    BOTH ends and collapsing internal whitespace.  This tolerates the
+    natural variation between what the case PDF quotes (often ending in
+    '。' or trailing ellipsis '……') and what an agent might write
+    (possibly with leading/trailing whitespace, missing terminal period,
+    or different ellipsis form like '…' / '...').
+
+    Examples:
+        "预告登记失效。"      -> "预告登记失效"
+        "   预告登记失效"     -> "预告登记失效"
+        "……禁止结婚的亲属关系的；……" -> "禁止结婚的亲属关系的"
+        "重婚的；…"           -> "重婚的"
     """
     if not content_text or pd.isna(content_text):
         return ""
-    
-    content_text = str(content_text).strip()
-    
-    # 去除末尾的标点符号 (Remove punctuation at the end)
-    content_text = re.sub(r'[。！？；，、]+$', '', content_text)
 
-    content_text = content_text.strip()
-    return content_text
+    s = str(content_text)
+    # Collapse all whitespace (Chinese legal text doesn't depend on
+    # interior spacing; PDF extraction often injects stray whitespace).
+    s = re.sub(r'\s+', '', s)
+    # Strip leading AND trailing punctuation — Chinese full-width set +
+    # Latin equivalents + ellipsis forms ('……'/'…'/'...').
+    PUNCT_CLASS = r'[。！？；，、：……\.,;:!?　"“”‘’\']*'
+    s = re.sub(r'^' + PUNCT_CLASS, '', s)
+    s = re.sub(PUNCT_CLASS + r'$', '', s)
+    return s
 
 def check_content(agent_workspace: str, groundtruth_workspace: str):
     agent_needed_file = os.path.join(agent_workspace,"revised_terms.csv")
@@ -60,46 +70,44 @@ def check_content(agent_workspace: str, groundtruth_workspace: str):
     
     check_columns = ["案件文件名称", "判决文书中的原始条款", "原始引用内容", "新法条款", "新法条款内容"]
 
-    if len(agent_df) != len(groundtruth_df):
-        return False, f"Row count mismatch: agent has {len(agent_df)} rows, groundtruth has {len(groundtruth_df)} rows"
+    # Recall-only check: the grader requires that every row in the
+    # groundtruth is present somewhere in the agent's output, but does
+    # NOT penalize the agent for producing extra rows.
+    #
+    # Rationale: the task prompt asks for "ANY clauses cited that
+    # conflict with, are inconsistent with, have been revised by, or
+    # repealed under the new law", which legitimately admits multiple
+    # revised provisions per case.  A faithful agent will often surface
+    # more rows than the curated GT subset (for example, additional
+    # revised cites the GT leaves out because of mapping ambiguity, like
+    # 民法总则→民法典 same-text moves).  Requiring exact set equality
+    # would penalize broader-but-correct answers; requiring strict
+    # supersetness still ensures every concretely-revised provision we
+    # care about is captured.
 
-    groundtruth_entries = set()
-    for index, gt_row in groundtruth_df.iterrows():
-        gt_entry_values = []
+    def make_key(row):
+        vals = []
         for col in check_columns:
-            value = str(gt_row[col]).strip()
+            v = str(row[col]).strip()
             if col in ["判决文书中的原始条款", "新法条款"]:
-                value = normalize_legal_clause(value)
+                v = normalize_legal_clause(v)
             elif col in ["原始引用内容", "新法条款内容"]:
-                value = normalize_content_text(value)
-            gt_entry_values.append(value)
-        gt_entry_key = tuple(gt_entry_values)
-        groundtruth_entries.add(gt_entry_key)
+                v = normalize_content_text(v)
+            vals.append(v)
+        return tuple(vals)
 
-    agent_entries = set()
-    for index, row in agent_df.iterrows():
-        entry_values = []
-        for col in check_columns:
-            value = str(row[col]).strip()
-            if col in ["判决文书中的原始条款", "新法条款"]:
-                value = normalize_legal_clause(value)
-            elif col in ["原始引用内容", "新法条款内容"]:
-                value = normalize_content_text(value)
-            entry_values.append(value)
-        entry_key = tuple(entry_values)
-        agent_entries.add(entry_key)
+    groundtruth_entries = {make_key(r) for _, r in groundtruth_df.iterrows()}
+    agent_entries = {make_key(r) for _, r in agent_df.iterrows()}
 
-    if groundtruth_entries != agent_entries:
-        missing_in_agent = groundtruth_entries - agent_entries
-        extra_in_agent = agent_entries - groundtruth_entries
-
-        error_msg = ""
-        if missing_in_agent:
-            error_msg += f"Missing in agent output: {len(missing_in_agent)} entries. "
-        if extra_in_agent:
-            error_msg += f"Extra in agent output: {len(extra_in_agent)} entries."
-
-        return False, error_msg.strip()
+    missing_in_agent = groundtruth_entries - agent_entries
+    if missing_in_agent:
+        sample = next(iter(missing_in_agent))
+        sample_short = tuple((v[:80] + "…") if len(v) > 80 else v for v in sample)
+        return False, (
+            f"Recall failed: {len(missing_in_agent)} of {len(groundtruth_entries)} "
+            f"required entries are missing from the agent output. "
+            f"Example missing entry: {sample_short}"
+        )
 
     return True, None
 

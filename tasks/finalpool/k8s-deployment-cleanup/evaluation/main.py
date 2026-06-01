@@ -8,6 +8,7 @@ from typing import Dict, List, Tuple, Any
 
 from utils.general.helper import normalize_str, read_json, print_color
 from utils.app_specific.poste.ops import find_emails_from_sender, mailbox_has_email_matching_body
+from utils.evaluation.retry import grade_with_retry
 
 
 VERBOSE = False
@@ -546,9 +547,17 @@ def main() -> int:
     email_ok = True
 
     # 2.1 Every should_receive must have a matching email from sender with expected content
+    # Layer 2 retry on each receiver: IMAP propagation lag for SMTP -> indexer
     for recv_email, cfg in should_receive_emails.items():
         imap_cfg = {"email": recv_email, **cfg}
-        matched, detail = mailbox_has_email_matching_body(imap_cfg, sender_query_for_imap, expected_email_raw)
+
+        def _check_one(_imap_cfg=imap_cfg):
+            m, d = mailbox_has_email_matching_body(_imap_cfg, sender_query_for_imap, expected_email_raw)
+            return (bool(m), None if m else f"no match for {_imap_cfg['email']}")
+
+        matched, _err = grade_with_retry(_check_one)
+        # Re-run once at end to get the detail for logging (cheap, side-effect-free)
+        _, detail = mailbox_has_email_matching_body(imap_cfg, sender_query_for_imap, expected_email_raw) if not matched else (None, {})
         email_details["should_receive"][recv_email] = {
             "matched": matched,
             "checked": detail.get("emails_checked") if isinstance(detail, dict) else None,

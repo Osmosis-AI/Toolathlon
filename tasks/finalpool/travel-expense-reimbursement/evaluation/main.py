@@ -4,6 +4,7 @@ from utils.general.helper import read_json
 from utils.general.helper import print_color
 from utils.app_specific.snowflake.helpers import get_table_row_count, row_exists, escape_sql_literal, fq_table_name
 from utils.app_specific.poste.checks import find_sent_emails
+from utils.evaluation.retry import grade_with_retry
 
 DB_NAME = "TRAVEL_EXPENSE_REIMBURSEMENT"
 SCHEMA_NAME = "PUBLIC"
@@ -157,38 +158,43 @@ def main():
             'subject_lower': f"expense claim review required: {str(claim['claim_id']).lower()}"
         })
 
-    # 2) Take all emails from the sender's inbox (no longer filter by address)
-    sent_msgs = find_sent_emails(sender_config)
+    def _check_emails():
+        # 2) Take all emails from the sender's inbox (no longer filter by address)
+        sent_msgs = find_sent_emails(sender_config)
 
-    # 3) First match and consume all "needed" emails
-    id_to_msg = {m['id']: m for m in sent_msgs}
-    remaining_ids = set(id_to_msg.keys())
+        # 3) First match and consume all "needed" emails
+        id_to_msg = {m['id']: m for m in sent_msgs}
+        remaining_ids = set(id_to_msg.keys())
 
-    for exp in expected_emails:
-        matched_id = None
-        for mid in list(remaining_ids):
-            msg = id_to_msg[mid]
-            if (msg.get('subject_lower','') == exp['subject_lower'] and
-                exp['to'] in (msg.get('to','') or '') and
-                exp['cc'] in (msg.get('cc','') or '')):
-                matched_id = mid
-                break
-        if matched_id is None:
-            print_color(f"[FAIL] Missing expected email: subject='{exp['subject']}', to='{exp['to']}', cc='{exp['cc']}'", "red")
-            return False
-        remaining_ids.remove(matched_id)
+        for exp in expected_emails:
+            matched_id = None
+            for mid in list(remaining_ids):
+                msg = id_to_msg[mid]
+                if (msg.get('subject_lower','') == exp['subject_lower'] and
+                    exp['to'] in (msg.get('to','') or '') and
+                    exp['cc'] in (msg.get('cc','') or '')):
+                    matched_id = mid
+                    break
+            if matched_id is None:
+                return False, f"Missing expected email: subject='{exp['subject']}', to='{exp['to']}', cc='{exp['cc']}'"
+            remaining_ids.remove(matched_id)
 
-    # 4) If there are any remaining emails reaching the monitored addresses, they are extra → failure
-    if remaining_ids:
-        extra = [id_to_msg[mid] for mid in remaining_ids]
-        print_color(f"[FAIL] Extra unexpected email(s) found: {len(extra)}", "red")
-        # Print the first three for debugging
-        for i, em in enumerate(extra[:3]):
-            print_color(f"  - Extra[{i+1}] subject='{em.get('subject','')}', to='{em.get('to','')}', cc='{em.get('cc','')}'", "blue")
+        # 4) If there are any remaining emails reaching the monitored addresses, they are extra -> failure
+        if remaining_ids:
+            extra = [id_to_msg[mid] for mid in remaining_ids]
+            details = []
+            for i, em in enumerate(extra[:3]):
+                details.append(f"Extra[{i+1}] subject='{em.get('subject','')}', to='{em.get('to','')}', cc='{em.get('cc','')}'")
+            return False, f"Extra unexpected email(s) found: {len(extra)}; " + "; ".join(details)
+        return True, None
+
+    # Layer 2 retry: IMAP propagation lag for sent-folder indexer
+    ok, err = grade_with_retry(_check_emails)
+    if not ok:
+        print_color(f"[FAIL] {err}", "red")
         return False
-    else:
-        print_color("[PASS] All expected emails exist and no extra emails found", "green")
-    
+    print_color("[PASS] All expected emails exist and no extra emails found", "green")
+
     return True
 
 if __name__ == "__main__":
