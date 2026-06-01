@@ -8,6 +8,7 @@ Based on the implementation from tasks/prepare/canvas-notification-python/canvas
 """
 
 import requests
+from requests.exceptions import ConnectionError, Timeout
 import csv
 import os
 import glob
@@ -16,14 +17,44 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+)
+
+
+# Layer-1 retry settings.  Canvas in the v3 sandbox is fronted by a Rails
+# server inside a docker container that occasionally returns 502/504 while
+# Puma reloads, plus the usual transient Postgres-pool stalls.  Bounded so
+# a fully-down Canvas fails out in ~33s wall-clock instead of indefinitely.
+DEFAULT_TIMEOUT = 10  # per-attempt seconds; was unbounded
+
+
+class _TransientCanvasError(Exception):
+    """Marker for 5xx / 429 responses that should trigger another attempt.
+    4xx-other-than-429 (404, 401, 403, 422 …) surface as the normal
+    ``requests.HTTPError`` and are NOT retried — those are deterministic
+    client errors that retrying only hides.
+    """
+
+
+canvas_retry = retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=4),
+    retry=retry_if_exception_type((ConnectionError, Timeout, _TransientCanvasError)),
+    reraise=True,
+)
+
 
 class CanvasAPI:
     """Main Canvas API client providing comprehensive Canvas operations"""
-    
+
     def __init__(self, base_url: str, access_token: str):
         """
         Initialize Canvas API client
-        
+
         Args:
             base_url: Canvas instance base URL (e.g., 'http://localhost:10001')
             access_token: Canvas API access token
@@ -34,58 +65,65 @@ class CanvasAPI:
             'Authorization': f'Bearer {access_token}',
             'Content-Type': 'application/json'
         }
-    
-    def _make_request(self, method: str, endpoint: str, data: Optional[Dict] = None, 
+
+    @canvas_retry
+    def _request_with_retry(self, method: str, url: str, *,
+                            params: Optional[Dict] = None,
+                            json: Optional[Dict] = None) -> requests.Response:
+        """Single HTTP attempt; raises ``_TransientCanvasError`` on retry-worthy
+        status (5xx / 429) so the tenacity decorator triggers another go.
+        Other 4xx errors propagate as ``HTTPError`` and are NOT retried.
+        """
+        response = requests.request(
+            method.upper(), url,
+            headers=self.headers, params=params, json=json,
+            timeout=DEFAULT_TIMEOUT,
+        )
+        if response.status_code >= 500 or response.status_code == 429:
+            raise _TransientCanvasError(
+                f"Canvas {method.upper()} {url} → HTTP {response.status_code}"
+            )
+        response.raise_for_status()  # 4xx-other-than-429: not retried
+        return response
+
+    def _make_request(self, method: str, endpoint: str, data: Optional[Dict] = None,
                      params: Optional[Dict] = None, expect_json: bool = True) -> Optional[Dict]:
         """
         Make a request to Canvas API with error handling
-        
+
         Args:
             method: HTTP method (GET, POST, PUT, DELETE)
             endpoint: API endpoint (without base URL)
             data: Request body data
             params: URL parameters
             expect_json: Whether to expect JSON response (default: True)
-            
+
         Returns:
             Response data or None if error
         """
+        if method.upper() not in ('GET', 'POST', 'PUT', 'DELETE'):
+            raise ValueError(f"Unsupported HTTP method: {method}")
+
         url = f"{self.base_url}/api/v1/{endpoint.lstrip('/')}"
-        
+
         try:
-            if method.upper() == 'GET':
-                response = requests.get(url, headers=self.headers, params=params)
-            elif method.upper() == 'POST':
-                response = requests.post(url, headers=self.headers, json=data, params=params)
-            elif method.upper() == 'PUT':
-                response = requests.put(url, headers=self.headers, json=data, params=params)
-            elif method.upper() == 'DELETE':
-                response = requests.delete(url, headers=self.headers, params=params)
-            else:
-                raise ValueError(f"Unsupported HTTP method: {method}")
-            
-            response.raise_for_status()
-            
-            # Handle different response types
-            if expect_json:
-                if response.content:
-                    return response.json()
-                else:
-                    # Some successful operations return empty content
-                    return {'success': True, 'status_code': response.status_code}
-            else:
-                return {'success': True, 'status_code': response.status_code, 'content': response.text}
-            
+            response = self._request_with_retry(method, url, params=params, json=data)
         except requests.exceptions.RequestException as e:
+            # Preserves original contract: any unrecoverable transport-or-HTTP
+            # error becomes ``None`` for the caller.  Layer-1 retry already
+            # fired up to 3 times by this point.
             print(f"API Error ({method} {endpoint}): {e}")
-            if hasattr(e, 'response') and e.response is not None:
-                try:
-                    error_data = e.response.json()
-                    # Error details available in error_data if needed for debugging
-                except:
-                    # Response parsing failed, status code available in e.response.status_code if needed
-                    pass
             return None
+
+        # Handle different response types
+        if expect_json:
+            if response.content:
+                return response.json()
+            else:
+                # Some successful operations return empty content
+                return {'success': True, 'status_code': response.status_code}
+        else:
+            return {'success': True, 'status_code': response.status_code, 'content': response.text}
     
     # Course Management Methods
     def create_course(self, name: str, course_code: str, account_id: int = 1, **kwargs) -> Optional[Dict]:

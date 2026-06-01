@@ -1,5 +1,6 @@
 import imaplib
 import smtplib
+import socket
 import json
 import email
 import time
@@ -11,6 +12,33 @@ from email.utils import formataddr
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Dict, Optional, Any, Tuple
+
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+)
+
+
+# Layer-1 retry settings.  Same shape as utils/app_specific/poste/ops.py so
+# the two helpers behave consistently when graders or preprocess scripts
+# use either one.  Bounded to 3 attempts × ~10s socket timeout + 1+2s
+# backoff so a fully-down Poste fails out in well under the Layer-2 budget.
+_IMAP_SOCKET_TIMEOUT = 10
+_SMTP_SOCKET_TIMEOUT = 10
+
+_lem_retry = retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=4),
+    retry=retry_if_exception_type((
+        OSError, socket.error,
+        imaplib.IMAP4.error,
+        smtplib.SMTPConnectError, smtplib.SMTPServerDisconnected,
+        smtplib.SMTPHeloError,
+    )),
+    reraise=True,
+)
 
 
 class EmailSendError(Exception):
@@ -50,16 +78,33 @@ class LocalEmailManager:
     # IMAP related functions
     # ========================================
     
+    @_lem_retry
     def connect_imap(self) -> imaplib.IMAP4:
-        """Connect to IMAP server and login (if necessary)"""
-        if self.use_ssl:
-            mail = imaplib.IMAP4_SSL(self.imap_server, self.imap_port)
-        else:
-            mail = imaplib.IMAP4(self.imap_server, self.imap_port)
+        """Connect to IMAP server and login (if necessary).
+
+        Layer-1 retry covers transient transport-level failures (TCP
+        refused, socket timeout, IMAP4.abort).  RuntimeError raised here
+        for a *login* failure (bad credentials) is NOT retried — that's a
+        deterministic auth error.
+        """
+        imap_kwargs = {"timeout": _IMAP_SOCKET_TIMEOUT}
+        try:
+            if self.use_ssl:
+                mail = imaplib.IMAP4_SSL(self.imap_server, self.imap_port, **imap_kwargs)
+            else:
+                mail = imaplib.IMAP4(self.imap_server, self.imap_port, **imap_kwargs)
+        except TypeError:  # Python < 3.9: no timeout kwarg
+            if self.use_ssl:
+                mail = imaplib.IMAP4_SSL(self.imap_server, self.imap_port)
+            else:
+                mail = imaplib.IMAP4(self.imap_server, self.imap_port)
 
         try:
             mail.login(self.email, self.password)
         except imaplib.IMAP4.error as e:
+            # Don't re-raise as IMAP4.error (which would trigger another
+            # retry attempt) — convert to RuntimeError so login failures
+            # surface deterministically.
             raise RuntimeError(f"IMAP login failed: {e}")
         return mail
 
