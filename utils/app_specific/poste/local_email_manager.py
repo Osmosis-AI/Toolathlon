@@ -390,9 +390,17 @@ class LocalEmailManager:
                             elif match == 'year' or match.startswith('today+') or match.startswith('today-'):
                                 try:
                                     if match == 'year':
+                                        # Use today's year directly.  An
+                                        # earlier version added 30 days
+                                        # before extracting the year,
+                                        # which flipped the year at the
+                                        # December boundary (e.g.
+                                        # today=2025-12-05 → year 2026).
+                                        # Tasks that need "next year"
+                                        # should use placeholder_values
+                                        # to set ``year`` explicitly.
                                         today_date = datetime.fromisoformat(today)
-                                        future_date = today_date + timedelta(days=30)
-                                        replacement = str(future_date.year)
+                                        replacement = str(today_date.year)
                                     elif match.startswith('today+'):
                                         days_to_add = int(match[6:])  # Remove 'today+' prefix
                                         today_date = datetime.fromisoformat(today)
@@ -443,16 +451,32 @@ class LocalEmailManager:
             with open(placeholder_file_path, 'r', encoding='utf-8') as f:
                 placeholder_values = json.load(f)
 
-        # Get today's date
-        today = datetime.now().strftime('%Y-%m-%d')
+        # Get today's date.  Prefer an existing ``save_today_to`` file
+        # (treat it as a checked-in fixture) so the planted emails are
+        # reproducible across calendar drift.  Only fall back to
+        # ``datetime.now()`` if the file is missing or empty/unparseable.
+        # The file is only written when we generated the value — never
+        # overwritten if it already had a valid date.
+        today = None
+        if save_today_to and Path(save_today_to).exists():
+            try:
+                existing = Path(save_today_to).read_text(encoding='utf-8').strip()
+                if existing:
+                    # Validate it parses as a date
+                    datetime.fromisoformat(existing)
+                    today = existing
+                    self._log(f"📅 Using existing today.txt fixture: {today}")
+            except (ValueError, OSError):
+                today = None
 
-        # Save today's date to specified file
-        if save_today_to:
-            today_path = Path(save_today_to)
-            today_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(today_path, 'w', encoding='utf-8') as f:
-                f.write(today)
-            self._log(f"✅ Today's date saved to: {today_path}")
+        if today is None:
+            today = datetime.now().strftime('%Y-%m-%d')
+            if save_today_to:
+                today_path = Path(save_today_to)
+                today_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(today_path, 'w', encoding='utf-8') as f:
+                    f.write(today)
+                self._log(f"✅ Today's date saved to: {today_path}")
 
         try:
             with open(file_path, 'r', encoding='utf-8') as f:

@@ -72,9 +72,7 @@
         "Architecture": "Diffusion-based",
         "Sources": [
             "https://github.com/CompVis/stable-diffusion",
-            "https://github.com/runwayml/stable-diffusion-v1-5",
             "https://github.com/runwayml/stable-diffusion",
-            "https://github.com/stable-diffusion-v1-5/stable-diffusion-v1-5",
             "https://github.com/Kameronski/stable-diffusion-1.5"
         ]
     },
