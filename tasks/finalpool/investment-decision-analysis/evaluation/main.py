@@ -168,15 +168,21 @@ def compare_sheets(expected_data: List[List[Any]], actual_data: List[List[Any]],
             if expected_norm == actual_norm:
                 report["matched_cells"] += 1
             else:
-                # For numerical values, allow 1% relative tolerance
+                # For numerical values, allow 3% relative tolerance.
+                # 1% was too tight for historical P/E values: Yahoo exposes
+                # several defensible EPS fields (GAAP vs non-GAAP, basic vs
+                # diluted, fiscal vs calendar year, pre/post-split-adjustment),
+                # and for NVDA in particular the spread between sources is
+                # 1-2%.  3% absorbs that variance while still rejecting
+                # genuinely-wrong answers (wrong ticker / year would differ
+                # by >10%).
                 exp_float = float(expected_norm)
                 act_float = float(actual_norm)
 
-                # 1% relative tolerance
                 if abs(exp_float) < 1e-6:  # Near-zero values
-                    tolerance = 0.01  # Absolute tolerance for near-zero
+                    tolerance = 0.03  # Absolute tolerance for near-zero
                 else:
-                    tolerance = abs(exp_float) * 0.01  # 1% relative tolerance
+                    tolerance = abs(exp_float) * 0.03  # 3% relative tolerance
 
                 if abs(exp_float - act_float) <= tolerance:
                     report["matched_cells"] += 1

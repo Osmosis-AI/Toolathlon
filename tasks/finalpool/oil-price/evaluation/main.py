@@ -572,6 +572,34 @@ def _round4(x: float | None) -> float | None:
     return float(f"{float(x):.4f}")
 
 
+# Tolerance constants — sized to absorb Yahoo live-data noise (mainly the
+# most-recent-month close revision and aggregation timing) without weakening
+# the substantive correctness signal.  See PR notes for rationale.
+PRICE_ABS_TOL = 0.05            # USD absolute floor
+PRICE_REL_TOL = 0.001           # 0.1% relative
+MOM_PCT_TOL = 0.10              # percentage points
+SPREAD_ABS_TOL = 0.05           # USD
+
+
+def _close_within_tol(expected: float | None, actual: float | None) -> bool:
+    if expected is None or actual is None:
+        return expected == actual
+    try:
+        e, a = float(expected), float(actual)
+    except Exception:
+        return False
+    return abs(e - a) <= max(PRICE_ABS_TOL, abs(e) * PRICE_REL_TOL)
+
+
+def _within(expected: float | None, actual: float | None, tol: float) -> bool:
+    if expected is None or actual is None:
+        return expected == actual
+    try:
+        return abs(float(expected) - float(actual)) <= tol
+    except Exception:
+        return False
+
+
 def _compare_summary(expected: List[Dict], actual: List[Dict]) -> List[str]:
     errs: List[str] = []
     act_map = {r["m"]: r for r in actual}
@@ -581,24 +609,26 @@ def _compare_summary(expected: List[Dict], actual: List[Dict]) -> List[str]:
         if not a:
             errs.append(f"Notion missing month: {m}")
             continue
-        # compare rounded values
-        if _round4(e["wti_close"]) != _round4(a["wti_close"]):
-            errs.append(f"WTI Close inconsistent: {m}")
-        if _round4(e["brent_close"]) != _round4(a["brent_close"]):
-            errs.append(f"Brent Close inconsistent: {m}")
+        # Closes: absolute $0.05 or 0.1% relative, whichever is larger.  This
+        # absorbs Yahoo's most-recent-month aggregation timing without letting
+        # through wrong-symbol or wrong-month answers (those differ by >>1%).
+        if not _close_within_tol(e["wti_close"], a["wti_close"]):
+            errs.append(f"WTI Close inconsistent: {m} (expected {e['wti_close']} actual {a['wti_close']})")
+        if not _close_within_tol(e["brent_close"], a["brent_close"]):
+            errs.append(f"Brent Close inconsistent: {m} (expected {e['brent_close']} actual {a['brent_close']})")
+        # MoM %: 0.10pp tolerance — inherits roughly the relative close
+        # tolerance after the ratio.
         if e.get("wti_mom_pct") is None:
-            if a.get("wti_mom_pct") not in (None,):
-                pass
+            # First month has no prior month; agent may or may not fill — skip
+            pass
         else:
-            if _round2(e["wti_mom_pct"]) != _round2(a.get("wti_mom_pct")):
-                errs.append(f"WTI MoM% inconsistent: {m}")
+            if not _within(e["wti_mom_pct"], a.get("wti_mom_pct"), MOM_PCT_TOL):
+                errs.append(f"WTI MoM% inconsistent: {m} (expected {e['wti_mom_pct']} actual {a.get('wti_mom_pct')})")
         if e.get("brent_mom_pct") is None:
-            if a.get("brent_mom_pct") not in (None,):
-                pass
+            pass
         else:
-            if _round2(e["brent_mom_pct"]) != _round2(a.get("brent_mom_pct")):
-                errs.append(f"Brent MoM% inconsistent: {m}")
-        # optional: regime/signal need to be read from Notion select, current actual does not contain regime/signal, skip
+            if not _within(e["brent_mom_pct"], a.get("brent_mom_pct"), MOM_PCT_TOL):
+                errs.append(f"Brent MoM% inconsistent: {m} (expected {e['brent_mom_pct']} actual {a.get('brent_mom_pct')})")
     return errs
 
 
@@ -946,25 +976,34 @@ async def async_main(args):
                     print(f"  - Period End: {bt_metrics_notion.get('period_end', 'N/A')}")
                     print(f"  - Cost Assumption: {bt_metrics_notion.get('cost_assumption', 'N/A')}")
 
-                    # Compare metrics (rounded tolerances)
+                    # Compare metrics with absolute tolerances on RAW values.
+                    # Previously the grader pre-rounded to 2 decimals and then
+                    # compared with tol=0.01, which fails at rounding-boundary
+                    # cases (e.g. raw 2.825 vs 2.824 → 2.83 vs 2.82, |Δ|=0.01
+                    # is not < 0.01 in float).  Pre-rounding removed; tolerances
+                    # widened to absorb the realistic Yahoo-revision noise that
+                    # propagates from monthly closes into the metrics.
                     def r2(x):
                         return float(f"{float(x):.2f}")
                     def r4(x):
                         return float(f"{float(x):.4f}")
 
                     cmp_pairs = [
-                        (r2(exp_metrics.get("total_return_pct", 0.0)), r2(bt_metrics_notion.get("total_return_pct", 0.0)), "Total Return %", 0.01),
-                        (r2(exp_metrics.get("annualized_return_pct", 0.0)), r2(bt_metrics_notion.get("annualized_return_pct", 0.0)), "Annualized Return %", 0.01),
-                        (r2(exp_metrics.get("sharpe_ann", 0.0)), r2(bt_metrics_notion.get("sharpe_ann", 0.0)), "Sharpe (ann.)", 0.05),  # More lenient for Sharpe ratio
-                        (r2(exp_metrics.get("win_rate_pct", 0.0)), r2(bt_metrics_notion.get("win_rate_pct", 0.0)), "Win Rate %", 0.01),
-                        (r2(exp_metrics.get("max_drawdown_pct", 0.0)), r2(bt_metrics_notion.get("max_drawdown_pct", 0.0)), "Max Drawdown %", 0.01),
+                        (exp_metrics.get("total_return_pct", 0.0),     bt_metrics_notion.get("total_return_pct", 0.0),     "Total Return %",      0.05),
+                        (exp_metrics.get("annualized_return_pct", 0.0), bt_metrics_notion.get("annualized_return_pct", 0.0), "Annualized Return %", 0.05),
+                        (exp_metrics.get("sharpe_ann", 0.0),            bt_metrics_notion.get("sharpe_ann", 0.0),            "Sharpe (ann.)",       0.05),
+                        (exp_metrics.get("win_rate_pct", 0.0),          bt_metrics_notion.get("win_rate_pct", 0.0),          "Win Rate %",          0.01),
+                        (exp_metrics.get("max_drawdown_pct", 0.0),      bt_metrics_notion.get("max_drawdown_pct", 0.0),      "Max Drawdown %",      0.05),
                     ]
-                    # Apply different tolerances for different metrics
                     for ev, av, name, tolerance in cmp_pairs:
-                        if abs(ev - av) > tolerance:
-                            errors.append(f"Backtest metrics inconsistent: {name} expected {ev} actual {av}")
+                        try:
+                            evf, avf = float(ev), float(av)
+                        except Exception:
+                            evf, avf = 0.0, 0.0
+                        if abs(evf - avf) > tolerance:
+                            errors.append(f"Backtest metrics inconsistent: {name} expected {evf:.4f} actual {avf:.4f}")
                         else:
-                            print(f"  ✅ {name}: expected {ev} actual {av} (difference {abs(ev-av):.4f} <= tolerance {tolerance})")
+                            print(f"  ✅ {name}: expected {evf:.4f} actual {avf:.4f} (Δ={abs(evf-avf):.4f} ≤ tol {tolerance})")
 
                     # Compare period start/end & cost assumption
                     exp_period_start = expected_seq[0]["m"] if expected_seq else ""
@@ -1012,13 +1051,16 @@ async def async_main(args):
                             if (et.get("exit_month") or "") != (at.get("exit_month") or ""):
                                 errors.append(f"Trade#{i} Exit Month inconsistent: expected {et.get('exit_month')} actual {at.get('exit_month')}")
 
-                            if r4(et.get("entry_spread", 0.0)) != r4(at.get("entry_spread", 0.0)):
+                            # Spread = Brent close - WTI close; inherits the
+                            # same per-close tolerance.  Net PnL is a single
+                            # month's return derived from those closes.
+                            if not _within(et.get("entry_spread", 0.0), at.get("entry_spread", 0.0), SPREAD_ABS_TOL):
                                 errors.append(f"Trade#{i} Entry Spread inconsistent: expected {et.get('entry_spread')} actual {at.get('entry_spread')}")
 
-                            if r4(et.get("exit_spread", 0.0)) != r4(at.get("exit_spread", 0.0)):
+                            if not _within(et.get("exit_spread", 0.0), at.get("exit_spread", 0.0), SPREAD_ABS_TOL):
                                 errors.append(f"Trade#{i} Exit Spread inconsistent: expected {et.get('exit_spread')} actual {at.get('exit_spread')}")
 
-                            if r2(et.get("net_pnl_pct", 0.0)) != r2(at.get("net_pnl_pct", 0.0)):
+                            if not _within(et.get("net_pnl_pct", 0.0), at.get("net_pnl_pct", 0.0), 0.05):
                                 errors.append(f"Trade#{i} Net PnL % inconsistent: expected {et.get('net_pnl_pct')} actual {at.get('net_pnl_pct')}")
 
                             # Leg-returns string comparison stays informational

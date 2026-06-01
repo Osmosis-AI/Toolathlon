@@ -33,11 +33,20 @@ def normalize_content_text(content_text):
     (possibly with leading/trailing whitespace, missing terminal period,
     or different ellipsis form like '…' / '...').
 
+    Also normalizes internal '；' to '。' — Chinese full-width semicolon
+    and period are both sentence/clause separators and the official law
+    text uses them interchangeably (e.g. '...不继承；没有...' vs
+    '...不继承。没有...').  Agents that transcribe a long quote often
+    flip one for the other; we don't want strict substring to fail on
+    purely stylistic punctuation.  We do NOT collapse other punctuation
+    (，、：) since those carry more information in legal listings.
+
     Examples:
         "预告登记失效。"      -> "预告登记失效"
         "   预告登记失效"     -> "预告登记失效"
         "……禁止结婚的亲属关系的；……" -> "禁止结婚的亲属关系的"
         "重婚的；…"           -> "重婚的"
+        "不继承；没有..."     -> "不继承。没有..."
     """
     if not content_text or pd.isna(content_text):
         return ""
@@ -46,6 +55,8 @@ def normalize_content_text(content_text):
     # Collapse all whitespace (Chinese legal text doesn't depend on
     # interior spacing; PDF extraction often injects stray whitespace).
     s = re.sub(r'\s+', '', s)
+    # Normalize internal full-width semicolon to period — see docstring.
+    s = s.replace('；', '。')
     # Strip leading AND trailing punctuation — Chinese full-width set +
     # Latin equivalents + ellipsis forms ('……'/'…'/'...').
     PUNCT_CLASS = r'[。！？；，、：……\.,;:!?　"“”‘’\']*'
