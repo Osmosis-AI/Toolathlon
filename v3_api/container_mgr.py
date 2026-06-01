@@ -346,8 +346,38 @@ async def _run_setup(execution: ExecutionState) -> None:
         # grading scripts / preprocess code that could short-circuit
         # the task.  ``run_eval`` later restores ``evaluation/`` and
         # ``groundtruth_workspace/`` from the stash before invoking the
-        # grader.  ``preprocess/`` is not restored — not needed for
-        # grading.
+        # grader.  ``preprocess/`` is also restored because several
+        # graders import sibling helper modules from it (e.g.
+        # ``from woocommerce_client import ...``).
+        #
+        # We ADDITIONALLY stash a small allow-list of task-root files
+        # that are known to leak ground-truth to the agent:
+        #
+        #   * ``gt_record.md`` — task-author notes containing expected
+        #     values verbatim (language-school, trip-itinerary-generator
+        #     have these).
+        #   * ``expected_results.json`` — same.
+        #   * ``README.md`` / ``readme.md`` — usually maintainer notes
+        #     but several contain expected outputs.  Stashing is safe
+        #     because the agent doesn't need them; the prompt is
+        #     delivered separately via the system message.
+        #
+        # We DO NOT stash other task-root files (``token_key_session.py``,
+        # ``email_config.json``, ``woocommerce_config.json``,
+        # ``k8s_configs/``, ``files/folder_id.txt``, ``canvas_api.py``,
+        # ``other_key.py``, ``docs/``, ``initial_workspace/``,
+        # ``task_config.json``, ``__pycache__``, etc.) because they
+        # are read at agent runtime by MCP servers via paths baked
+        # into the bundle's ``local_token_key_session``.  Moving them
+        # would break the gateway / MCP startup.
+        STASH_SUBDIRS = ("preprocess", "evaluation", "groundtruth_workspace")
+        # Filenames (compared lower-case) that look like GT leaks at the
+        # task root.  Glob-style basenames; no path components.
+        STASH_LEAK_FILENAMES = {
+            "gt_record.md",
+            "expected_results.json",
+            "readme.md",  # match any case via tolower() check below
+        }
         task_in_container = f"/workspace/tasks/finalpool/{task_id}"
         # Host-side stash, namespaced by instance prefix so co-resident
         # v3 services (different repo checkouts, different ports) never
@@ -357,14 +387,17 @@ async def _run_setup(execution: ExecutionState) -> None:
         instance_prefix = _get_instance_prefix() or "default"
         stash_root = Path(f"/tmp/v3-task-stash/{instance_prefix.rstrip('-')}")
         stash_dir = stash_root / execution.execution_id
+        if stash_dir.exists():
+            shutil.rmtree(stash_dir, ignore_errors=True)
         stash_dir.mkdir(parents=True, exist_ok=True)
         execution.task_stash_dir = str(stash_dir)
-        for sub in ("preprocess", "evaluation", "groundtruth_workspace"):
+
+        stashed: list = []
+        # Stash the three known grader-side subdirs (original behavior).
+        for sub in STASH_SUBDIRS:
             if not (task_source / sub).is_dir():
                 continue  # some tasks legitimately lack one of these
             dest = stash_dir / sub
-            if dest.exists():
-                shutil.rmtree(dest, ignore_errors=True)
             _run_cmd(
                 [runtime, "cp", f"{container_name}:{task_in_container}/{sub}", str(dest)],
                 timeout=120,
@@ -373,7 +406,41 @@ async def _run_setup(execution: ExecutionState) -> None:
                 [runtime, "exec", container_name, "rm", "-rf", f"{task_in_container}/{sub}"],
                 timeout=30,
             )
-        log(f"Withheld preprocess/evaluation/groundtruth for {task_id} (stash={stash_dir})")
+            stashed.append(sub)
+
+        # Additionally stash task-root files whose name matches a known
+        # GT-leak pattern.  Enumerate inside the container so we pick up
+        # any files preprocess might have created at task root.
+        ls_result = _run_cmd(
+            [runtime, "exec", container_name, "ls", "-1", task_in_container],
+            timeout=15,
+        )
+        entries = [
+            line.strip()
+            for line in (ls_result.stdout or "").splitlines()
+            if line.strip()
+        ]
+        for entry in entries:
+            if entry.lower() not in STASH_LEAK_FILENAMES:
+                continue
+            # Only stash regular files at task root (not directories).
+            type_check = _run_cmd(
+                [runtime, "exec", container_name, "test", "-f", f"{task_in_container}/{entry}"],
+                timeout=10,
+            )
+            if type_check.returncode != 0:
+                continue
+            dest = stash_dir / entry
+            _run_cmd(
+                [runtime, "cp", f"{container_name}:{task_in_container}/{entry}", str(dest)],
+                timeout=60,
+            )
+            _run_cmd(
+                [runtime, "exec", container_name, "rm", "-f", f"{task_in_container}/{entry}"],
+                timeout=15,
+            )
+            stashed.append(entry)
+        log(f"Withheld {','.join(stashed)} for {task_id} (stash={stash_dir})")
 
         # Step 5: Start gateway (as root — same user the container's
         # default exec runs as).  MCP servers + python_execute inherit
@@ -517,14 +584,20 @@ async def teardown_container(execution: ExecutionState) -> None:
 async def run_eval(execution: ExecutionState) -> GradeResponse:
     """Run ``container_eval.py`` inside the task container and parse results.
 
-    Restores ``preprocess/``, ``evaluation/`` and ``groundtruth_workspace/``
-    from the host-side stash (created in ``start_execution`` Step 4.5)
-    so the grader has access to artifacts the agent could not see during
-    its tool-call phase.  ``preprocess/`` has to come back too — several
-    tasks' graders import helper modules from there
-    (woocommerce-update-cover/preprocess/woocommerce_client.py is the
-    canonical case), and they fail with ``ImportError: No module named
-    'woocommerce_client'`` if the directory is still absent at grade time.
+    Restores the stashed grader-side entries from the host-side stash
+    created in ``start_execution`` Step 4.5.  The stash contains the
+    three grader-only subdirs (``preprocess/``, ``evaluation/``,
+    ``groundtruth_workspace/``) plus a small set of known GT-leak
+    files at task root (``gt_record.md``, ``expected_results.json``,
+    ``README.md``).  Other task-root contents (``token_key_session.py``,
+    config JSONs, helper ``.py`` modules, etc.) were never moved
+    because MCP servers read them at agent runtime via paths baked
+    into the bundle.
+
+    ``preprocess/`` has to come back too — several graders import
+    sibling helper modules from it (e.g.
+    ``from woocommerce_client import ...``), and they fail with
+    ``ImportError`` if the directory is still absent at grade time.
 
     Caller (router) is responsible for calling ``manager.cleanup_execution``
     after grading returns (success or failure) — that's the contract that
@@ -535,27 +608,30 @@ async def run_eval(execution: ExecutionState) -> GradeResponse:
     task_id = execution.task_id
     log(f"Running evaluation for execution {execution.execution_id}")
 
-    # Re-materialise grader-side dirs from the host stash.  Tolerant
-    # of missing subdirs — many tasks have no groundtruth_workspace/
-    # or preprocess/.
+    # Re-materialise stashed entries (grader-side subdirs + the few
+    # GT-leak files at task root) from the host stash.  Each entry in
+    # ``stash_dir`` is either a directory (e.g. ``preprocess/``,
+    # ``evaluation/``, ``groundtruth_workspace/``) or a file (e.g.
+    # ``gt_record.md``, ``README.md``).  ``docker cp`` handles both
+    # uniformly.
     stash_dir = Path(execution.task_stash_dir) if execution.task_stash_dir else None
     if stash_dir and stash_dir.is_dir():
         target_task_dir = f"/workspace/tasks/finalpool/{task_id}"
+        # Make sure the destination exists (Step 4.5 leaves it empty
+        # but present; defensive in case some other step removed it).
+        _run_cmd(
+            [runtime, "exec", container, "mkdir", "-p", target_task_dir],
+            timeout=15,
+        )
         restored = []
-        for sub in ("preprocess", "evaluation", "groundtruth_workspace"):
-            src = stash_dir / sub
-            if not src.is_dir():
-                continue
+        for entry in sorted(p.name for p in stash_dir.iterdir()):
+            src = stash_dir / entry
             _run_cmd(
-                [runtime, "exec", container, "mkdir", "-p", f"{target_task_dir}/{sub}"],
-                timeout=15,
-            )
-            _run_cmd(
-                [runtime, "cp", f"{str(src)}/.", f"{container}:{target_task_dir}/{sub}/"],
+                [runtime, "cp", f"{str(src)}", f"{container}:{target_task_dir}/{entry}"],
                 timeout=120,
             )
-            restored.append(sub)
-        log(f"Restored {'+'.join(restored)} for {execution.execution_id} from {stash_dir}")
+            restored.append(entry)
+        log(f"Restored task source ({len(restored)} entries) for {execution.execution_id} from {stash_dir}")
 
     eval_cmd = (
         "uv run python -m scripts.decoupled.container_eval "
