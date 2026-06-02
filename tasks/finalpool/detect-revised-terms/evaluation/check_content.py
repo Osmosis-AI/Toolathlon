@@ -33,13 +33,14 @@ def normalize_content_text(content_text):
     (possibly with leading/trailing whitespace, missing terminal period,
     or different ellipsis form like '…' / '...').
 
-    Also normalizes internal '；' to '。' — Chinese full-width semicolon
-    and period are both sentence/clause separators and the official law
-    text uses them interchangeably (e.g. '...不继承；没有...' vs
-    '...不继承。没有...').  Agents that transcribe a long quote often
-    flip one for the other; we don't want strict substring to fail on
-    purely stylistic punctuation.  We do NOT collapse other punctuation
-    (，、：) since those carry more information in legal listings.
+    Also normalizes typography variations that are semantically
+    interchangeable in Chinese legal text:
+      * '；' → '。' (full-width semicolon vs period as clause separator)
+      * '（' → '(', '）' → ')' (full-width Chinese parens vs half-width
+        ASCII parens — auto-transcription tools commonly flip these)
+    We do NOT collapse other punctuation (，、：) since those carry more
+    information in legal listings, nor do we normalize Chinese digits
+    or characters — only the stylistic-equivalence pairs.
 
     Examples:
         "预告登记失效。"      -> "预告登记失效"
@@ -57,6 +58,14 @@ def normalize_content_text(content_text):
     s = re.sub(r'\s+', '', s)
     # Normalize internal full-width semicolon to period — see docstring.
     s = s.replace('；', '。')
+    # Normalize full-width Chinese parens to half-width ASCII parens.
+    # Same rationale as ；→。 normalization above: stylistically
+    # interchangeable in Chinese legal text — the official law text
+    # often uses full-width ``（一）（二）...`` enumeration while auto-
+    # transcription / MCP tools commonly emit half-width ``(一)(二)``.
+    # The semantic meaning is identical; collapsing to one form lets
+    # the substring check survive purely-typesetting variation.
+    s = s.replace('（', '(').replace('）', ')')
     # Strip leading AND trailing punctuation — Chinese full-width set +
     # Latin equivalents + ellipsis forms ('……'/'…'/'...').
     PUNCT_CLASS = r'[。！？；，、：……\.,;:!?　"“”‘’\']*'
