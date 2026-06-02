@@ -26,44 +26,66 @@ def _check_shortest_length(agent_csv_path: str, groundtruth_csv_path: str):
         return False, f"Could not read CSV files: {e}"
 
     errors = []
-    if agent_df.shape != groundtruth_df.shape:
-        errors.append(
-            f"CSV shape mismatch: agent has {agent_df.shape}, groundtruth has {groundtruth_df.shape}"
-        )
+    # The prompt says "from step 0, at intervals of every 100 steps".  Two
+    # reasonable interpretations:
+    #   (a) strict — only steps that are multiples of 100 (e.g. 0,100,200,
+    #       300,400).  Agent rows = GT minus the trailing final-checkpoint
+    #       row.
+    #   (b) inclusive — same multiples-of-100 set PLUS the final
+    #       checkpoint (last logged step, may not be a multiple of 100).
+    #       Agent rows = full GT.
+    # Both are defensible readings; accept either.  GT carries the full
+    # (b) form; if the agent's CSV omits the final row, we compare only
+    # the first N-1 rows.  All other shapes are mismatches.
     if not agent_df.columns.equals(groundtruth_df.columns):
         errors.append(
             f"Column mismatch: agent has {list(agent_df.columns)}, groundtruth has {list(groundtruth_df.columns)}"
         )
 
     if not errors:
+        n_gt = len(groundtruth_df)
+        n_ag = len(agent_df)
+        if n_ag == n_gt:
+            compare_rows = n_gt
+        elif n_ag == n_gt - 1:
+            # Agent dropped the trailing final-checkpoint row — strict
+            # interpretation of "every 100 steps".
+            compare_rows = n_gt - 1
+        else:
+            errors.append(
+                f"CSV row count mismatch: agent has {n_ag} rows, groundtruth has "
+                f"{n_gt} (with final checkpoint) or {n_gt - 1} (without).  "
+                f"Neither matches."
+            )
+
+    if not errors:
         try:
-            if not agent_df.equals(groundtruth_df):
-                differences = []
-                for row_idx in range(min(len(agent_df), len(groundtruth_df))):
-                    for col_name in agent_df.columns:
-                        if col_name in groundtruth_df.columns:
-                            agent_val = agent_df.iloc[row_idx][col_name]
-                            truth_val = groundtruth_df.iloc[row_idx][col_name]
-                            if pd.isna(agent_val) and pd.isna(truth_val):
-                                continue
-                            elif pd.isna(agent_val) or pd.isna(truth_val):
+            differences = []
+            for row_idx in range(compare_rows):
+                for col_name in agent_df.columns:
+                    if col_name in groundtruth_df.columns:
+                        agent_val = agent_df.iloc[row_idx][col_name]
+                        truth_val = groundtruth_df.iloc[row_idx][col_name]
+                        if pd.isna(agent_val) and pd.isna(truth_val):
+                            continue
+                        elif pd.isna(agent_val) or pd.isna(truth_val):
+                            differences.append(
+                                f"Row {row_idx}, Column '{col_name}': agent='{agent_val}', groundtruth='{truth_val}'"
+                            )
+                        elif isinstance(agent_val, (int, float)) and isinstance(truth_val, (int, float)):
+                            if abs(float(agent_val) - float(truth_val)) > 0.01:
                                 differences.append(
-                                    f"Row {row_idx}, Column '{col_name}': agent='{agent_val}', groundtruth='{truth_val}'"
+                                    f"Row {row_idx}, Column '{col_name}': agent={agent_val}, groundtruth={truth_val}"
                                 )
-                            elif isinstance(agent_val, (int, float)) and isinstance(truth_val, (int, float)):
-                                if abs(float(agent_val) - float(truth_val)) > 0.01:
-                                    differences.append(
-                                        f"Row {row_idx}, Column '{col_name}': agent={agent_val}, groundtruth={truth_val}"
-                                    )
-                            elif str(agent_val).strip() != str(truth_val).strip():
-                                differences.append(
-                                    f"Row {row_idx}, Column '{col_name}': agent='{agent_val}', groundtruth='{truth_val}'"
-                                )
-                if differences:
-                    msg = "CSV content mismatch found: " + "; ".join(differences[:10])
-                    if len(differences) > 10:
-                        msg += f"; ... and {len(differences) - 10} more differences"
-                    errors.append(msg)
+                        elif str(agent_val).strip() != str(truth_val).strip():
+                            differences.append(
+                                f"Row {row_idx}, Column '{col_name}': agent='{agent_val}', groundtruth='{truth_val}'"
+                            )
+            if differences:
+                msg = "CSV content mismatch found: " + "; ".join(differences[:10])
+                if len(differences) > 10:
+                    msg += f"; ... and {len(differences) - 10} more differences"
+                errors.append(msg)
         except Exception as e:
             errors.append(f"Error comparing CSV content: {e}")
 
