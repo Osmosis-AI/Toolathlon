@@ -80,6 +80,8 @@ K8S_TASK_IMAGES=(
     prom/prometheus:v2.52.0
     python:3.12-alpine
     redis:7.2
+    # k8s-pr-preview-testing (preview.yaml from feature/pr-123 branch)
+    nginx:1.25-alpine
 )
 _pulled=0
 _skipped=0
