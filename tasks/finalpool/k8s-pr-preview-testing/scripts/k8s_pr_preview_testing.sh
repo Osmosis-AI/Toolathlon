@@ -256,6 +256,23 @@ start_operation() {
     log_error "Aborting start_operation: cluster verification failed for ${cluster_name}"
     return 1
   fi
+
+  # Pre-load the canonical app image (already built into the host
+  # docker daemon by upstream provisioning) into the kind cluster so
+  # the agent's ``kubectl apply -f preview.yaml`` doesn't try to pull
+  # from Docker Hub.  Best-effort: warn if the image isn't present
+  # (perhaps the agent will use a different image; kubelet will then
+  # fall back to upstream pulls).
+  REQUIRED_IMAGES=(simple-shopping-static:pr123)
+  for _img in "${REQUIRED_IMAGES[@]}"; do
+    if docker image inspect "$_img" >/dev/null 2>&1; then
+      log_info "kind load $_img into cluster $cluster_name (offline)..."
+      kind load docker-image "$_img" --name "$cluster_name" || log_warning "kind load $_img failed"
+    else
+      log_warning "Host docker cache missing $_img — skipping preload (agent will fetch as needed)"
+    fi
+  done
+
   log_info "========== Cluster ready for deployment =========="
   log_info "KUBECONFIG is set to: $configpath"
   log_info "You can now deploy your services using:"
