@@ -44,6 +44,71 @@ echo "==========================================================================
 echo ""
 
 # ---------------------------------------------------------------------------
+# Refresh the host's docker image cache for images referenced by the v3
+# k8s tasks.  Per-task preprocess scripts then `kind load docker-image`
+# from this cache into their kind clusters offline (no Docker Hub round
+# trip per preprocess → no rate-limit issues under multi-instance load).
+#
+# Best-effort: anonymous Docker Hub allows ~100 pulls / 6h per IP, so a
+# refresh sweep that exceeds the quota will start failing midway.  Each
+# pull is run with a short timeout, return-codes are ignored, and we
+# continue on failure.  Even partial success is a win — anything
+# already cached is enough for that image's pre-load step in preprocess
+# (and a stale cached version is reused indefinitely until either this
+# refresh or a manual ``docker pull`` replaces it).
+#
+# Why here: this script runs on every shared-infra deploy.  Whoever
+# triggers a deploy (operator restart, periodic re-deploy, etc.) gets a
+# fresh-as-possible image cache without burdening the per-task hot path.
+# ---------------------------------------------------------------------------
+echo "============================================================================================="
+echo "Refreshing docker image cache for k8s task images (best-effort, never fails the deploy) ..."
+echo "============================================================================================="
+K8S_TASK_IMAGES=(
+    # k8s-mysql
+    mysql:8.4
+    nginx:1.14
+    # k8s-deployment-cleanup
+    nginx:1.20-alpine
+    # k8s-redis-helm-upgrade (distractor pods)
+    oliver006/redis_exporter:v1.45.0
+    nginx:1.21-alpine
+    # k8s-safety-audit
+    alpine:3.20
+    busybox:1.36
+    nginxinc/nginx-unprivileged:1.25-alpine
+    prom/prometheus:v2.52.0
+    python:3.12-alpine
+    redis:7.2
+)
+_pulled=0
+_skipped=0
+_failed=0
+for _img in "${K8S_TASK_IMAGES[@]}"; do
+    # 30s timeout per pull — if Docker Hub is rate-limiting we'll fail
+    # fast and move on.  --quiet keeps output minimal in steady state.
+    if timeout 30 docker pull --quiet "$_img" >/dev/null 2>&1; then
+        # Did the pull actually do anything (refresh) vs no-op (already
+        # latest)?  We can't tell without parsing stdout; just count
+        # success.
+        _pulled=$(( _pulled + 1 ))
+    else
+        rc=$?
+        # rc=124 from `timeout` means the pull was killed; other codes
+        # mean docker itself returned non-zero (rate limit, network,
+        # missing image, etc.).  Both are "skip and continue".
+        if docker image inspect "$_img" >/dev/null 2>&1; then
+            _skipped=$(( _skipped + 1 ))   # have a stale copy, fine
+        else
+            _failed=$(( _failed + 1 ))     # don't have it; next preprocess will pull
+        fi
+    fi
+done
+echo "  pulled/refreshed: $_pulled    not refreshed but cached: $_skipped    missing: $_failed    (total: ${#K8S_TASK_IMAGES[@]})"
+echo "============================================================================================="
+echo ""
+
+# ---------------------------------------------------------------------------
 # Per-service ports.  apply_port_numbers.py rewrites these via its bounded
 # regex (`(?<![0-9])<old>(?![0-9])`) on every run, so both this file's named
 # variables and the REQUIRED_PORTS array stay in sync with ports_config.yaml.
