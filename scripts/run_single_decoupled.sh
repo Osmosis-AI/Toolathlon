@@ -469,7 +469,17 @@ for item in "${FILES_TO_COPY[@]}"; do
         echo "  Copying $item to container..."
         if [ -d "$PROJECT_ROOT/$item" ]; then
             $CONTAINER_RUNTIME exec "$CONTAINER_NAME" mkdir -p "/workspace/$item"
-            $CONTAINER_RUNTIME cp "$PROJECT_ROOT/$item/." "$CONTAINER_NAME:/workspace/$item/"
+            if [ "$item" = "configs" ] && [ -d "$PROJECT_ROOT/configs/.mcp-auth" ]; then
+                _stage=$(mktemp -d)
+                (
+                    cd "$PROJECT_ROOT/configs" && \
+                    find . -mindepth 1 -maxdepth 1 ! -name '.mcp-auth' -exec cp -a {} "$_stage/" \;
+                )
+                $CONTAINER_RUNTIME cp "$_stage/." "$CONTAINER_NAME:/workspace/$item/"
+                rm -rf "$_stage"
+            else
+                $CONTAINER_RUNTIME cp "$PROJECT_ROOT/$item/." "$CONTAINER_NAME:/workspace/$item/"
+            fi
         else
             parent_dir=$(dirname "$item")
             if [ "$parent_dir" != "." ]; then
@@ -519,10 +529,7 @@ fi
 
 # Copy MCP auth directory if it exists (prefer ./configs/.mcp-auth over ~/.mcp-auth)
 if [ -d "$PROJECT_ROOT/configs/.mcp-auth" ]; then
-    echo " Copying MCP authentication data from ./configs/.mcp-auth to container..."
-    $CONTAINER_RUNTIME exec "$CONTAINER_NAME" mkdir -p /root/.mcp-auth
-    $CONTAINER_RUNTIME cp "$PROJECT_ROOT/configs/.mcp-auth/." "$CONTAINER_NAME:/root/.mcp-auth/"
-    echo "✓ MCP auth data copied from project configs"
+    echo " Using bind-mounted MCP authentication data from ./configs/.mcp-auth"
 elif [ -d "$HOME/.mcp-auth" ]; then
     echo " ./configs/.mcp-auth not found, falling back to ~/.mcp-auth..."
     echo " Copying MCP authentication data from ~/.mcp-auth to container..."
