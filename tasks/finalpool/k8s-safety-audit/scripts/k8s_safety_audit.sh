@@ -162,6 +162,31 @@ start_operation() {
 
   create_cluster "$cluster_name" "$configpath"
   verify_cluster "${cluster_name}" "$configpath"
+
+  # Pre-load images from host docker cache into kind cluster's
+  # containerd so apply_resources doesn't pull from Docker Hub.
+  # Anonymous-pull rate limit (~100/6h per IP) is easily exhausted on
+  # a busy multi-instance host.  After first run the host cache stays
+  # warm and every subsequent invocation is fully offline.  Best-effort:
+  # warn on failures, never abort — kubelet will still fall back to
+  # upstream pulls if needed.
+  REQUIRED_IMAGES=(
+    alpine:3.20
+    busybox:1.36
+    nginxinc/nginx-unprivileged:1.25-alpine
+    prom/prometheus:v2.52.0
+    python:3.12-alpine
+    redis:7.2
+  )
+  for _img in "${REQUIRED_IMAGES[@]}"; do
+    if ! docker image inspect "$_img" >/dev/null 2>&1; then
+      log_info "Host docker cache missing $_img; pulling once..."
+      docker pull "$_img" || log_warning "docker pull $_img failed (will let kubelet retry)"
+    fi
+    log_info "kind load $_img into cluster $cluster_name (offline)..."
+    kind load docker-image "$_img" --name "$cluster_name" || log_warning "kind load $_img failed"
+  done
+
   apply_resources "$configpath"
 
   # Copy the config file to the backup directory

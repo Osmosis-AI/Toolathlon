@@ -17,6 +17,7 @@ if str(script_dir) not in sys.path:
     sys.path.insert(0, str(script_dir))
 
 from debug_notion import find_database_ids_in_page, get_page_content, get_page_blocks
+from utils.evaluation.retry import grade_with_retry
 
 NOTION_VERSION = "2022-06-28"
 WANDB_ENTITY = "mbzuai-llm"
@@ -412,22 +413,31 @@ def main():
         print(json.dumps({"ok": False, "reason": f"failed to find database: {str(e)}", "page_id": page_id}, ensure_ascii=False))
         raise RuntimeError(f"failed to find database: {str(e)}")
     
-    # Query database content
-    pages = notion_query_database(notion_token, db_id)
-    notion_rows: List[Dict] = []
-    for p in pages:
-        notion_rows.append(extract_db_row_values(p, headers))
+    # Query database content (Layer-2: retry the read+compare to absorb Notion
+    # propagation lag where a recent write hasn't surfaced yet).
+    def _query_and_compare():
+        pages = notion_query_database(notion_token, db_id)
+        notion_rows: List[Dict] = []
+        for p in pages:
+            notion_rows.append(extract_db_row_values(p, headers))
+        report = compare_with_notion(gt_rows, notion_rows, headers)
+        report["num_gt_rows"] = len(gt_rows)
+        if not report.get("ok", False):
+            error_msg = f"Notion comparison failed! Matched: {report.get('matched', 0)}/{report.get('total', 0)}"
+            if report.get("diffs"):
+                error_msg += f", Differences: {len(report.get('diffs', []))}"
+            return False, (error_msg, report)
+        return True, (None, report)
 
-    report = compare_with_notion(gt_rows, notion_rows, headers)
-    report["num_gt_rows"] = len(gt_rows)
-    
-    if not report.get("ok", False):
-        error_msg = f"Notion comparison failed! Matched: {report.get('matched', 0)}/{report.get('total', 0)}"
-        if report.get("diffs"):
-            error_msg += f", Differences: {len(report.get('diffs', []))}"
-        print(json.dumps(report, ensure_ascii=False))
+    ok, payload = grade_with_retry(_query_and_compare, max_attempts=4)
+    if not ok:
+        if isinstance(payload, tuple) and len(payload) == 2:
+            error_msg, report = payload
+            print(json.dumps(report, ensure_ascii=False))
+        else:
+            error_msg = str(payload)
         raise RuntimeError(error_msg)
-    
+    _, report = payload
     print(json.dumps(report, ensure_ascii=False))
 
 

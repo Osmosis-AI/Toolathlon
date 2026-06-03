@@ -59,6 +59,69 @@ cleanup_existing_cluster() {
   fi
 }
 
+# Remove orphan host containers that a prior agent may have spawned via
+# the shared /var/run/docker.sock — typically a socat forwarder
+# satisfying the task's "long-term basis" requirement of exposing the
+# kind NodePort on host:${PORT}.  These containers live on the host
+# (not in the agent's task container), so v3's per-task cleanup
+# doesn't see them.  If left behind, they hold ${PORT} and block the
+# next ``kind create cluster`` with "port already allocated".
+#
+# Three complementary passes so we catch all common agent shapes:
+#   1. Known name pattern — agents typically name forwarders after the
+#      app under test ("simple-shopping-*").
+#   2. Port-holding via -p mapping — any container with a declared
+#      port mapping for host port ${PORT}.
+#   3. Host-network containers whose command references ${PORT} — the
+#      publish filter misses these because they bind the host's port
+#      directly without docker port mapping.
+# Final ``ss`` check surfaces any non-docker holder we couldn't reach.
+cleanup_agent_host_artifacts() {
+  log_info "Cleaning up agent-spawned host artifacts (orphans from prior runs)..."
+
+  # Pass 1: known name pattern
+  local named
+  named=$(docker ps -aq --filter "name=simple-shopping-" 2>/dev/null)
+  if [ -n "$named" ]; then
+    log_info "  Removing simple-shopping-* containers:"
+    docker rm -f $named 2>&1 | sed 's/^/    /' || true
+  fi
+
+  # Pass 2: containers with declared -p port mapping for ${PORT}
+  local port_holders
+  port_holders=$(docker ps -q --filter "publish=${PORT}" 2>/dev/null)
+  if [ -n "$port_holders" ]; then
+    log_info "  Removing containers with -p mapping on ${PORT}:"
+    docker rm -f $port_holders 2>&1 | sed 's/^/    /' || true
+  fi
+
+  # Pass 3: --network=host containers whose command references ${PORT}.
+  local host_net_listeners=""
+  local cid netmode cmd
+  for cid in $(docker ps -q 2>/dev/null); do
+    netmode=$(docker inspect "$cid" --format '{{.HostConfig.NetworkMode}}' 2>/dev/null)
+    if [ "$netmode" = "host" ]; then
+      cmd=$(docker inspect "$cid" --format '{{json .Config.Cmd}} {{json .Args}}' 2>/dev/null)
+      if echo "$cmd" | grep -qw "${PORT}"; then
+        host_net_listeners="$host_net_listeners $cid"
+      fi
+    fi
+  done
+  if [ -n "$host_net_listeners" ]; then
+    log_info "  Removing --network=host containers referencing port ${PORT}:"
+    docker rm -f $host_net_listeners 2>&1 | sed 's/^/    /' || true
+  fi
+
+  if ss -tlnp 2>/dev/null | grep -q ":${PORT} "; then
+    log_warning "  Host port ${PORT} still bound after cleanup (non-docker process?):"
+    ss -tlnp 2>/dev/null | grep ":${PORT} " | sed 's/^/    /' || true
+  fi
+
+  if [ -z "$named" ] && [ -z "$port_holders" ] && [ -z "$host_net_listeners" ]; then
+    log_info "  No orphan containers found on host port ${PORT}"
+  fi
+}
+
 # Remove config files (only the specified config file)
 cleanup_config_files() {
   local config_path="$k8sconfig_path_dir/${cluster_name}-config.yaml"
@@ -156,6 +219,9 @@ start_operation() {
   log_info "========== Start Kind cluster deployment for PR Preview Testing =========="
   cleanup_existing_cluster
   cleanup_config_files
+  # Must run BEFORE create_cluster — otherwise an orphan forwarder/etc
+  # still owns host port ${PORT} and the kind create step fails.
+  cleanup_agent_host_artifacts
   show_inotify_status
   configpath="$k8sconfig_path_dir/${cluster_name}-config.yaml"
   backup_configpath="$backup_k8sconfig_path_dir/${cluster_name}-config.yaml"
@@ -163,8 +229,40 @@ start_operation() {
   echo ""
   log_info "========== Processing cluster ${cluster_name} =========="
 
-  create_cluster "${cluster_name}" "$configpath"
-  verify_cluster "${cluster_name}" "$configpath"
+  # Propagate exit codes — a silent create/verify failure used to leave
+  # preprocess reporting "done" while no cluster actually existed,
+  # which then deadlocked the k8s MCP server at gateway_boot.
+  if ! create_cluster "${cluster_name}" "$configpath"; then
+    log_error "Aborting start_operation: kind create cluster failed for ${cluster_name}"
+    return 1
+  fi
+  if ! verify_cluster "${cluster_name}" "$configpath"; then
+    log_error "Aborting start_operation: cluster verification failed for ${cluster_name}"
+    return 1
+  fi
+
+  # Pre-load the image referenced by preview.yaml on the agent's
+  # feature/pr-123 branch (verified against
+  # Toolathlon-Archive/SimpleShopping@feature/pr-123) so the agent's
+  # ``kubectl apply -f preview.yaml`` doesn't have to pull from
+  # Docker Hub.  If preview.yaml ever changes to a different image
+  # tag, kubelet will simply fall back to a live pull.
+  REQUIRED_IMAGES=(nginx:1.25-alpine)
+  for _img in "${REQUIRED_IMAGES[@]}"; do
+    if ! docker image inspect "$_img" >/dev/null 2>&1; then
+      log_info "Host docker cache missing $_img — attempting docker pull..."
+      if ! docker pull "$_img" 2>&1 | tail -3; then
+        log_warning "docker pull $_img returned non-zero (rate limit/offline?)"
+      fi
+    fi
+    if docker image inspect "$_img" >/dev/null 2>&1; then
+      log_info "kind load $_img into cluster $cluster_name (offline)..."
+      kind load docker-image "$_img" --name "$cluster_name" || log_warning "kind load $_img failed"
+    else
+      log_warning "$_img unavailable on host after pull attempt — agent's kubectl apply will need to pull from upstream"
+    fi
+  done
+
   log_info "========== Cluster ready for deployment =========="
   log_info "KUBECONFIG is set to: $configpath"
   log_info "You can now deploy your services using:"
@@ -194,8 +292,8 @@ start_operation() {
 main() {
   local operation=${2:-start}
   case "$operation" in
-    "start") start_operation ;;
-    "stop") stop_operation ;;
+    "start") start_operation || exit 1 ;;
+    "stop")  stop_operation  || exit 1 ;;
     *)
       log_error "Invalid operation: $operation"
       show_usage

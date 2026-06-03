@@ -43,6 +43,32 @@ def _find_latest_trading_day_price(ticker_obj, end_date, max_lookback_days=10):
         return float('nan')
 
 
+def _fetch_get_shares_full_near(ticker_obj, target_date, window_days=30):
+    """Return shares-outstanding from get_shares_full closest to target_date,
+    or NaN.  Used as a fallback when quarterly_balance_sheet has NaN."""
+    try:
+        start = target_date - timedelta(days=window_days)
+        end = target_date + timedelta(days=window_days)
+        sf = ticker_obj.get_shares_full(
+            start=start.strftime("%Y-%m-%d"),
+            end=end.strftime("%Y-%m-%d"),
+        )
+        if sf is None or len(sf) == 0:
+            return float('nan')
+        # Duplicates appear (revisions on the same day); keep the last.
+        sf = sf[~sf.index.duplicated(keep="last")]
+        target_ts = pd.Timestamp(target_date)
+        if sf.index.tz is not None:
+            target_ts = target_ts.tz_localize(sf.index.tz)
+        deltas = (sf.index - target_ts).to_numpy()
+        abs_ns = np.abs(deltas.astype("timedelta64[ns]").astype("int64"))
+        closest_pos = int(abs_ns.argmin())
+        return float(sf.iloc[closest_pos])
+    except Exception as e:
+        print(f"Warning: get_shares_full fallback failed near {target_date.strftime('%Y-%m-%d')}: {e}")
+        return float('nan')
+
+
 def check_basic_trend(
     target_file,
     ticker="NVDA",
@@ -67,11 +93,14 @@ def check_basic_trend(
     quarter_strs = ['2024Q3', '2024Q4', '2025Q1', '2025Q2']
     
     result_list = []
-    
+    # Secondary acceptable values populated only when the primary
+    # quarterly_balance_sheet source returns NaN.  See _compare_values_alt.
+    alt_by_q = {}
+
     # For each quarter, retrieve data from yfinance and compute needed values
     for date_str, quarter_str in zip(quarter_ends, quarter_strs):
         date = datetime.strptime(date_str, "%Y-%m-%d")
-        
+
         # Get closing price using improved time range matching (10 days lookback)
         price = _find_latest_trading_day_price(nvda, date, max_lookback_days=10)
 
@@ -83,23 +112,41 @@ def check_basic_trend(
                 # Find the closest quarter data within a reasonable time window
                 closest_col = None
                 min_diff = float('inf')
-                
+
                 for col in bs.columns:
                     diff_days = abs((col - date).days)
                     if diff_days <= 60 and diff_days < min_diff:  # Extended from 40 to 60 days
                         min_diff = diff_days
                         closest_col = col
-                
+
                 if closest_col is not None:
                     shares = bs.loc["Ordinary Shares Number", closest_col]
-                    print(f"Found shares data for {quarter_str}: {shares/1e6:.2f}M shares (from {closest_col.strftime('%Y-%m-%d')})")
+                    shares_disp = (shares / 1e6) if not pd.isna(shares) else float('nan')
+                    print(f"Found shares data for {quarter_str}: {shares_disp:.2f}M shares (from {closest_col.strftime('%Y-%m-%d')})")
                 else:
                     print(f"Warning: No shares data found for {quarter_str} within 60 days")
             else:
                 print(f"Warning: 'Ordinary Shares Number' not found in balance sheet")
-                
+
         except Exception as e:
             print(f"Error fetching balance sheet data for {quarter_str}: {e}")
+
+        # Fallback: when quarterly_balance_sheet is NaN for this quarter, try
+        # get_shares_full.  Yahoo populates one source but not the other for
+        # some older quarters; we accept either NaN or the secondary value.
+        if pd.isna(shares):
+            secondary = _fetch_get_shares_full_near(nvda, date)
+            if not pd.isna(secondary):
+                alt_market_cap = price * secondary if (not pd.isna(price) and secondary > 0) else float('nan')
+                alt_by_q[quarter_str] = {
+                    "Outstanding Shares (Million Shares)": secondary / 1e6,
+                    "Market Cap (Billion USD)": alt_market_cap / 1e9 if not pd.isna(alt_market_cap) else float('nan'),
+                }
+                print(
+                    f"Secondary GT for {quarter_str}: shares={secondary/1e6:.2f}M  "
+                    f"market_cap={alt_by_q[quarter_str]['Market Cap (Billion USD)']:.2f}B "
+                    f"(get_shares_full)"
+                )
 
         # Compute market cap
         market_cap = price * shares if (not pd.isna(price) and not pd.isna(shares) and shares > 0) else float('nan')
@@ -150,7 +197,17 @@ def check_basic_trend(
             gt_val = row[col]
             file_val = df.loc[idx, col]
             quarter = row['Quarter']
-            
+
+            # If the primary (quarterly_balance_sheet) is NaN but we have a
+            # secondary (get_shares_full) value, accept either: NaN per the
+            # prompt's "if data unavailable" rule, OR the secondary value
+            # within tolerance.  Applies to shares and the derived market cap.
+            alt = alt_by_q.get(quarter, {}).get(col)
+            if pd.isna(gt_val) and alt is not None and not pd.isna(file_val):
+                if not _compare_values(alt, file_val, f"{quarter} {col} (alt)"):
+                    exit(1)
+                continue
+
             # Use improved comparison function
             if not _compare_values(gt_val, file_val, f"{quarter} {col}"):
                 exit(1)

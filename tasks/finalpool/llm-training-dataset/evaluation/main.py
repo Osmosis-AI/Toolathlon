@@ -5,6 +5,7 @@ from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
 from googleapiclient.errors import HttpError
 from utils.general.helper import normalize_str
+from utils.evaluation.retry import grade_with_retry
 
 # Reference pre-training datasets for GPT-Neo and LLaMA (inclusion required, strict match not necessary)
 gpt_neo_sets_list = [
@@ -277,12 +278,24 @@ if __name__ == "__main__":
         print(f"ERROR: Failed to load Google credentials: {e}")
         exit(1)
 
-    # 2. Load ptdata sheet data
-    try:
-        ptdata_df = get_ptdata_sheet_content(TARGET_FOLDER_ID, creds, args.spreadsheet_name, args.sheet_name)
-    except DataLoadError as e:
-        print(f"ERROR: Failed to load data from sheet: {e}")
+    # 2. Load ptdata sheet data — wrap in Layer 2 retry to absorb Google
+    #    Sheets / Drive eventual-consistency lag (agent's write may not yet
+    #    be visible to our read session).
+    _ptdata_holder = {}
+    def _fetch_ptdata():
+        try:
+            _ptdata_holder["df"] = get_ptdata_sheet_content(
+                TARGET_FOLDER_ID, creds, args.spreadsheet_name, args.sheet_name
+            )
+            return True, None
+        except DataLoadError as e:
+            return False, f"Failed to load data from sheet: {e}"
+
+    ok, err = grade_with_retry(_fetch_ptdata)
+    if not ok:
+        print(f"ERROR: {err}")
         exit(1)
+    ptdata_df = _ptdata_holder["df"]
 
     # 3. Initialize counters and collect agent's datasets
     llama_cnt = 7
