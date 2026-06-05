@@ -30,22 +30,42 @@ class GitHubDataFetcher:
         self.repo_ids = [1, 1000000, 1000000000]
         
     def fetch_repo_by_id(self, repo_id: int) -> Optional[Dict[str, Any]]:
-        """Fetch repository information by GitHub repo ID."""
+        """Fetch repository information by GitHub repo ID.
+
+        Uses the shared ``github_retry`` decorator + ``_check_rate_limit``
+        so rate-limit responses (403 with ``X-RateLimit-Remaining: 0``
+        or 429 with ``Retry-After``) are caught and waited-out per
+        GitHub's reset window, rather than silently returning None.
+        """
+        # Lazy imports — keep this task-local module decoupled from
+        # the shared github helpers at module-load time.
+        from utils.app_specific.github.api import (
+            github_retry, _check_rate_limit,
+        )
+
         url = f"{self.base_url}/repositories/{repo_id}"
-        
+
+        @github_retry
+        def _do_fetch():
+            r = requests.get(url, headers=self.headers, timeout=60)
+            _check_rate_limit(r)
+            return r
+
         try:
-            response = requests.get(url, headers=self.headers)
-            
+            response = _do_fetch()
+
             if response.status_code == 404:
                 print(f"⚠️  Repository ID {repo_id} not found (404)")
                 return None
             elif response.status_code == 403:
-                print(f"❌ Rate limit exceeded or access forbidden for repo ID {repo_id}")
+                # After _check_rate_limit, a remaining 403 is a real
+                # permission error, not rate-limit.
+                print(f"❌ Access forbidden for repo ID {repo_id}")
                 return None
             elif response.status_code != 200:
                 print(f"❌ Error fetching repo ID {repo_id}: HTTP {response.status_code}")
                 return None
-                
+
             repo_data = response.json()
             
             # Extract required fields

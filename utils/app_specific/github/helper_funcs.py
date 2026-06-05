@@ -2,7 +2,10 @@ import requests
 import base64
 import traceback
 import time
-from .api import github_headers, GITHUB_API, DEFAULT_TIMEOUT, github_retry
+from .api import (
+    github_headers, GITHUB_API, DEFAULT_TIMEOUT, github_retry,
+    _check_rate_limit, _throttle_mutation,
+)
 
 
 @github_retry
@@ -15,6 +18,7 @@ def get_user_name(token):
     """
     url = f"{GITHUB_API}/user"
     r = requests.get(url, headers=github_headers(token), timeout=DEFAULT_TIMEOUT)
+    _check_rate_limit(r)
     if r.status_code != 200:
         raise RuntimeError(f"Failed to fetch GitHub user: {r.status_code} {r.text}")
     return r.json().get("login")
@@ -34,6 +38,7 @@ def read_file_content(token, repo_name, file_path, branch="master"):
     url = f"{GITHUB_API}/repos/{repo_name}/contents/{file_path}"
     params = {"ref": branch}
     r = requests.get(url, headers=github_headers(token), params=params, timeout=DEFAULT_TIMEOUT)
+    _check_rate_limit(r)
 
     try:
         if r.status_code == 404:
@@ -67,6 +72,7 @@ def roll_back_commit(token, repo_name, commit_sha, branch="master"):
     :param branch_name: Branch name
     :param commit_sha: SHA of the commit to roll back to
     """
+    _throttle_mutation()
     url = f"{GITHUB_API}/repos/{repo_name}/git/refs/heads/{branch}"
     payload = {
         "sha": commit_sha,
@@ -74,6 +80,7 @@ def roll_back_commit(token, repo_name, commit_sha, branch="master"):
     }
 
     r = requests.patch(url, headers=github_headers(token), json=payload, timeout=DEFAULT_TIMEOUT)
+    _check_rate_limit(r)
     if r.status_code == 200:
         print(f"Branch {branch} has been rolled back to commit: {commit_sha}")
     else:
@@ -106,7 +113,9 @@ def create_file(token, repo_name, file_path, commit_message, content, branch="ma
         "branch": branch
     }
 
+    _throttle_mutation()
     r = requests.put(url, headers=github_headers(token), json=payload, timeout=DEFAULT_TIMEOUT)
+    _check_rate_limit(r)
     if r.status_code in (200, 201):
         print(f"File {file_path} has been created on branch {branch}.")
     else:
@@ -129,6 +138,7 @@ def update_file(token, repo_name, file_path, commit_message, content, branch="ma
     get_url = f"{GITHUB_API}/repos/{repo_name}/contents/{file_path}"
     params = {"ref": branch}
     r_get = requests.get(get_url, headers=github_headers(token), params=params, timeout=DEFAULT_TIMEOUT)
+    _check_rate_limit(r_get)
 
     if r_get.status_code != 200:
         raise RuntimeError(f"Failed to get file {file_path}: {r_get.status_code} {r_get.text}")
@@ -150,7 +160,9 @@ def update_file(token, repo_name, file_path, commit_message, content, branch="ma
         "branch": branch
     }
 
+    _throttle_mutation()
     r = requests.put(put_url, headers=github_headers(token), json=payload, timeout=DEFAULT_TIMEOUT)
+    _check_rate_limit(r)
     if r.status_code in (200, 201):
         print(f"File {file_path} has been updated on branch {branch}.")
     else:
@@ -171,6 +183,7 @@ def delete_folder_contents(token, repo_name, folder_path, branch="master"):
         url = f"{GITHUB_API}/repos/{repo_name}/contents/{path}"
         params = {"ref": branch}
         r = requests.get(url, headers=github_headers(token), params=params, timeout=DEFAULT_TIMEOUT)
+        _check_rate_limit(r)
 
         if r.status_code == 404:
             print(f"Folder {path} does not exist")
@@ -189,6 +202,7 @@ def delete_folder_contents(token, repo_name, folder_path, branch="master"):
                 _delete_contents_recursive(item["path"])
             else:
                 # Delete file
+                _throttle_mutation()
                 delete_url = f"{GITHUB_API}/repos/{repo_name}/contents/{item['path']}"
                 delete_payload = {
                     "message": f"Delete {item['path']}",
@@ -196,6 +210,7 @@ def delete_folder_contents(token, repo_name, folder_path, branch="master"):
                     "branch": branch
                 }
                 delete_r = requests.delete(delete_url, headers=github_headers(token), json=delete_payload, timeout=DEFAULT_TIMEOUT)
+                _check_rate_limit(delete_r)
                 if delete_r.status_code == 200:
                     print(f"Deleted: {item['path']}")
                 else:
@@ -220,6 +235,7 @@ def get_latest_commit_sha(token, repo_name, branch="master"):
     """
     url = f"{GITHUB_API}/repos/{repo_name}/branches/{branch}"
     r = requests.get(url, headers=github_headers(token), timeout=DEFAULT_TIMEOUT)
+    _check_rate_limit(r)
 
     if r.status_code != 200:
         raise RuntimeError(f"Failed to get branch {branch}: {r.status_code} {r.text}")
@@ -243,11 +259,15 @@ def get_modified_files_between_commits(token, repo_name, old_sha, new_sha):
 
     try:
         r = requests.get(url, headers=github_headers(token), timeout=DEFAULT_TIMEOUT)
+        # Raise GitHubRateLimitError for rate-limited responses so the
+        # @github_retry decorator can wait + retry (it used to silently
+        # return None on 403, masking rate-limit as "not found").
+        _check_rate_limit(r)
         if r.status_code == 404:
             print("One or more commits do not exist")
             return None
         elif r.status_code == 403:
-            print("Permission denied or API rate limit exceeded")
+            print("Permission denied")
             return None
         elif r.status_code != 200:
             print(f"Error: HTTP {r.status_code} - {r.text}")
@@ -273,6 +293,7 @@ def check_repo_exists(token, repo_name):
 
     try:
         r = requests.get(url, headers=github_headers(token), timeout=DEFAULT_TIMEOUT)
+        _check_rate_limit(r)
         if r.status_code == 200:
             return True
         elif r.status_code == 404:
@@ -297,12 +318,14 @@ def fork_repo(token, source_repo_name, new_repo_name=""):
     """
     try:
         # Fork the repository
+        _throttle_mutation()
         fork_url = f"{GITHUB_API}/repos/{source_repo_name}/forks"
         fork_data = {}
         if new_repo_name:
             fork_data["name"] = new_repo_name
 
         r = requests.post(fork_url, headers=github_headers(token), json=fork_data, timeout=DEFAULT_TIMEOUT)
+        _check_rate_limit(r)
         if r.status_code != 202:
             raise RuntimeError(f"Failed to fork repository: {r.status_code} {r.text}")
 
@@ -314,10 +337,12 @@ def fork_repo(token, source_repo_name, new_repo_name=""):
             time.sleep(2)
 
             user_login = get_user_name(token)
+            _throttle_mutation()
             rename_url = f"{GITHUB_API}/repos/{user_login}/{forked_repo_info['name']}"
             rename_data = {"name": new_repo_name}
 
             rename_r = requests.patch(rename_url, headers=github_headers(token), json=rename_data, timeout=DEFAULT_TIMEOUT)
+            _check_rate_limit(rename_r)
             if rename_r.status_code == 200:
                 forked_repo_info = rename_r.json()
 
@@ -350,6 +375,7 @@ def create_repo(token, repo_name, description="", private=False):
     :param private: Whether to create a private repository, default is False
     :return: Created repository object
     """
+    _throttle_mutation()
     url = f"{GITHUB_API}/user/repos"
     payload = {
         "name": repo_name,
@@ -360,6 +386,7 @@ def create_repo(token, repo_name, description="", private=False):
     }
 
     r = requests.post(url, headers=github_headers(token), json=payload, timeout=DEFAULT_TIMEOUT)
+    _check_rate_limit(r)
     if r.status_code != 201:
         raise RuntimeError(f"Failed to create repo {repo_name}: {r.status_code} {r.text}")
 
