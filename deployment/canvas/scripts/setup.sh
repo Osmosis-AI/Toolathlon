@@ -55,9 +55,11 @@ case $operation in
     echo "Configuring Canvas domain to use port ${http_port}..."
     $podman_or_docker exec $container_name bash -c "sed -i 's/domain: \"localhost:3000\"/domain: \"localhost:${http_port}\"/' /opt/canvas/canvas-lms/config/domain.yml"
 
-    # Restart Canvas services inside container to apply config
+    # Restart Canvas services inside container to apply config.
+    # Do not restart postgres here; this old image can leave stale shared memory
+    # after a fast postgres restart, causing intermittent PG::ConnectionBad.
     echo "Restarting Canvas services to apply domain configuration..."
-    $podman_or_docker exec $container_name supervisorctl restart all 2>/dev/null || true
+    $podman_or_docker exec $container_name supervisorctl restart canvas_web canvas_worker 2>/dev/null || true
 
     # Wait for services to restart
     echo "Waiting for Canvas services to fully restart..."
