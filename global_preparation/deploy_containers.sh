@@ -12,6 +12,83 @@ echo "==========================================================================
 
 sleep 5
 
+# ---------------------------------------------------------------------------
+# Reclaim disk that previous failed-deploy attempts may have leaked.
+#
+# Every time a shared-infra container crashes and setup.sh restarts it,
+# docker creates a fresh anonymous volume for the new container.  Old
+# volumes left behind ("dangling") accumulate to hundreds of GB across
+# thousands of restarts and eventually fill the disk, at which point
+# subsequent deploys fail with "No space left on device" from inside
+# mysqld / canvas postgres.  Prune at deploy start so we begin with the
+# largest possible free disk.
+# ---------------------------------------------------------------------------
+echo "============================================================================================="
+echo "Disk-reclaim sweep before deploy ..."
+echo "============================================================================================="
+df -h / | awk 'NR==1 || /\//' | head -2
+docker volume prune -f 2>&1 | grep -E "reclaimed|^[a-f0-9]{6,}" | tail -3 || true
+docker container prune -f --filter "until=24h" 2>&1 | grep -E "reclaimed|^[a-f0-9]{6,}" | tail -3 || true
+docker image prune -f 2>&1 | grep -E "reclaimed" | tail -1 || true
+df -h / | awk '/\//' | head -1
+echo "============================================================================================="
+echo ""
+
+# ---------------------------------------------------------------------------
+# Refresh the host's docker image cache for images referenced by the
+# k8s tasks.  Per-task preprocess scripts then `kind load docker-image`
+# from this cache into their kind clusters offline — no Docker Hub
+# round trip per preprocess → no rate-limit issues under repeated runs.
+#
+# Best-effort: anonymous Docker Hub allows ~100 pulls / 6h per IP, so
+# a refresh sweep that exceeds the quota will start failing midway.
+# Each pull is run with a short timeout, return-codes are ignored, and
+# we continue on failure.  Even partial success is a win — anything
+# already cached is enough for that image's pre-load step in
+# preprocess.
+# ---------------------------------------------------------------------------
+echo "============================================================================================="
+echo "Refreshing docker image cache for k8s task images (best-effort, never fails the deploy) ..."
+echo "============================================================================================="
+K8S_TASK_IMAGES=(
+    # k8s-mysql
+    mysql:8.4
+    nginx:1.14
+    # k8s-deployment-cleanup
+    nginx:1.20-alpine
+    # k8s-redis-helm-upgrade (distractor pods)
+    oliver006/redis_exporter:v1.45.0
+    nginx:1.21-alpine
+    # k8s-safety-audit
+    alpine:3.20
+    busybox:1.36
+    nginxinc/nginx-unprivileged:1.25-alpine
+    prom/prometheus:v2.52.0
+    python:3.12-alpine
+    redis:7.2
+    # k8s-pr-preview-testing (preview.yaml from feature/pr-123 branch)
+    nginx:1.25-alpine
+)
+_pulled=0
+_skipped=0
+_failed=0
+for _img in "${K8S_TASK_IMAGES[@]}"; do
+    # 30s timeout per pull — if Docker Hub is rate-limiting we'll fail
+    # fast and move on.  --quiet keeps output minimal in steady state.
+    if timeout 30 docker pull --quiet "$_img" >/dev/null 2>&1; then
+        _pulled=$(( _pulled + 1 ))
+    else
+        if docker image inspect "$_img" >/dev/null 2>&1; then
+            _skipped=$(( _skipped + 1 ))   # have a stale copy, fine
+        else
+            _failed=$(( _failed + 1 ))     # don't have it; next preprocess will pull
+        fi
+    fi
+done
+echo "  pulled/refreshed: $_pulled    not refreshed but cached: $_skipped    missing: $_failed    (total: ${#K8S_TASK_IMAGES[@]})"
+echo "============================================================================================="
+echo ""
+
 # Read `podman_or_docker` from global_configs.py
 podman_or_docker=$(uv run python -c "import sys; sys.path.append('configs'); from global_configs import global_configs; print(global_configs.podman_or_docker)" 2>/dev/null || echo "docker")
 
