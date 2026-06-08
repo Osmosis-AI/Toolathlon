@@ -140,14 +140,54 @@ def git_auth_url(token: str, full_name: str) -> str:
     return f"https://x-access-token:{token}@github.com/{full_name}.git"
 
 
+async def _prune_hidden_refs(local_dir: str) -> None:
+    """Delete server-managed refs from a mirror clone that GitHub
+    refuses to accept on push.
+
+    ``git clone --mirror`` fetches EVERY ref including those that
+    GitHub considers hidden / read-only on its side:
+      * ``refs/pull/*``  — open and merged pull-request refs (head/merge)
+      * ``refs/changes/*`` — Gerrit-style review refs (rare but seen)
+
+    When ``git push --mirror`` then tries to write these back to a
+    DIFFERENT repository, GitHub rejects each with:
+        ! [remote rejected] refs/pull/1/head -> refs/pull/1/head
+                                  (deny updating a hidden ref)
+    which makes the overall push exit non-zero even when every branch
+    and tag pushed cleanly.  Stripping these refs from the local
+    mirror BEFORE the push avoids the rejection entirely.
+    """
+    for prefix in ("refs/pull/", "refs/changes/"):
+        # for-each-ref lists matching refs; update-ref -d deletes each
+        cmd = (
+            f"bash -c \"git -C {local_dir} for-each-ref --format='%(refname)' "
+            f"{prefix} | xargs -r -I {{}} git -C {local_dir} update-ref -d {{}}\""
+        )
+        stdout, stderr, rc = await run_command(cmd, debug=False, show_output=False)
+        # Best-effort: a clone without any matching refs returns rc=0
+        # with no output; a real failure here would be unusual, log
+        # and continue so the push still gets a chance.
+        if rc != 0:
+            print(
+                f"[git_ops] _prune_hidden_refs: non-fatal warning for prefix "
+                f"{prefix} in {local_dir} (rc={rc}): {(stderr or '')[:200]}",
+                flush=True,
+            )
+
+
 @git_retry_async
 async def git_mirror_clone(token: str, full_name: str, local_dir: str) -> None:
-    """Clone a repository as a mirror."""
+    """Clone a repository as a mirror, then strip GitHub-managed
+    hidden refs (``refs/pull/*``, ``refs/changes/*``) so a subsequent
+    ``git push --mirror`` doesn't get rejected by GitHub for trying
+    to update refs it owns.  See ``_prune_hidden_refs`` for details.
+    """
     src_url = git_auth_url(token, full_name)
     if os.path.exists(local_dir):
         shutil.rmtree(local_dir)
     cmd = f"git clone --mirror {src_url} {local_dir}"
     await _run_git_capturing(cmd)
+    await _prune_hidden_refs(local_dir)
 
 
 @git_retry_async
