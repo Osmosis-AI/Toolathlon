@@ -75,18 +75,45 @@ async def _run_git_capturing(cmd: str) -> None:
     stdout, stderr, rc = await run_command(cmd, debug=False, show_output=False)
     if rc == 0:
         return
-    combined = f"{stderr or ''}\n{stdout or ''}".strip()
+
+    stderr = stderr or ""
+    stdout = stdout or ""
+    combined = f"{stderr}\n{stdout}".strip()
+
+    # Always log the FULL output to the server log so failures are
+    # diagnosable later — the truncated exception message in v3's
+    # cleanup_execution log otherwise hides the actual error line,
+    # which for ``git push --mirror`` usually comes AFTER a long list
+    # of successful ``[new branch]`` updates and gets clipped.
+    print(
+        f"[git_ops] command FAILED rc={rc}: {cmd}\n"
+        f"--- stderr ({len(stderr)} chars) ---\n{stderr}\n"
+        f"--- stdout ({len(stdout)} chars) ---\n{stdout}\n"
+        f"--- end ---",
+        flush=True,
+    )
+
     if _stderr_indicates_rate_limit(combined):
         # No header to parse → conservative 60s base.  ``_wait_for_github``
-        # will escalate on repeated hits.
+        # will escalate on repeated hits.  Include the TAIL of stderr in
+        # the exception message — for git push that's where the actual
+        # failure line is (after the list of successful refs).
         raise GitHubRateLimitError(
             wait_seconds=60.0,
             scope="secondary",
             status_code=429,
-            message=f"git command rate-limited (rc={rc}): {combined[:200]}",
+            message=f"git command rate-limited (rc={rc}): ...{combined[-400:]}",
         )
+
+    # Non-rate-limit failure.  Preserve the TAIL of the output (head is
+    # usually success noise like ``* [new branch] foo -> foo`` lines;
+    # the real error is at the end).  Keep a small head too so we can
+    # see what command produced this.
+    head = combined[:200]
+    tail = combined[-800:] if len(combined) > 200 else ""
+    sep = "\n  ...truncated...\n" if tail else ""
     raise RuntimeError(
-        f"git command failed (rc={rc}): {cmd}\n{combined[:500]}"
+        f"git command failed (rc={rc}): {cmd}\n{head}{sep}{tail}"
     )
 
 
