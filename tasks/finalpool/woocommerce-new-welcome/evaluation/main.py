@@ -13,6 +13,7 @@ from typing import Dict, List, Tuple, Any, Optional
 # Import email validation utilities
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), 'utils', 'app_specific', 'poste'))
 from utils.app_specific.poste.checks import verify_emails_sent_to_recipients, extract_url_patterns_from_email
+from utils.evaluation.retry import grade_with_retry
 
 with open("configs/gcp-service_account.keys.json", "r") as f:
     data = json.load(f)
@@ -451,7 +452,8 @@ def run_remote_evaluation() -> Tuple[bool, str]:
 
         # Load first-time customers for email verification
         if 'first_time_customers' in locals():
-            email_ok, email_msg = email_validator.verify_welcome_emails_sent(first_time_customers)
+            # Layer 2 retry: IMAP propagation lag for sent-folder indexer
+            email_ok, email_msg = grade_with_retry(lambda: email_validator.verify_welcome_emails_sent(first_time_customers))
             results.append(("Welcome Email Format", email_ok, email_msg))
         else:
             results.append(("Welcome Email Format", False, "No first-time customers data available"))

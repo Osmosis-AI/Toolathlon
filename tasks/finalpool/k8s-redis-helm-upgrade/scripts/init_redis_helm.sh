@@ -434,7 +434,57 @@ start_operation() {
   # Create cluster
   create_cluster "${cluster_name}" "$configpath"
   verify_cluster "${cluster_name}" "$configpath"
-  
+
+  # Pre-load images from host docker cache into kind cluster.  The
+  # bitnami/redis chart 19.0.0 pulls bitnamilegacy/redis:<tag> via the
+  # --set image.repository=bitnamilegacy/redis override.  Bitnami no
+  # longer publishes legacy images to Docker Hub for older versions, so
+  # pulls hit 404/429 even when the host has the matching ``bitnami/``
+  # variant cached (different registry namespace).  We bridge by
+  # retagging host-cached ``bitnami/*`` images to ``bitnamilegacy/*``
+  # before kind load — the SHA is identical, only the name differs.
+  #
+  # Best-effort throughout: warn on failures, never abort; kubelet will
+  # still fall back to upstream pulls if needed.
+  HELM_VERSION="${initial_version:-19.0.0}"
+  # bitnami chart 19.0.0 default redis tag.  Keep in lockstep with
+  # ``initial_version`` above when the chart version is bumped.
+  REDIS_TAG="7.2.4-debian-12-r9"
+  BITNAMILEGACY_IMAGES=(
+    "redis:${REDIS_TAG}"
+  )
+  for _name_tag in "${BITNAMILEGACY_IMAGES[@]}"; do
+    src="bitnami/${_name_tag}"
+    dst="bitnamilegacy/${_name_tag}"
+    if ! docker image inspect "$dst" >/dev/null 2>&1; then
+      if docker image inspect "$src" >/dev/null 2>&1; then
+        log_info "Retag $src → $dst (same SHA, bitnamilegacy namespace)..."
+        docker tag "$src" "$dst" || log_warning "docker tag failed for $src → $dst"
+      else
+        log_info "Host docker cache missing $dst (no $src to retag); pulling once..."
+        docker pull "$dst" || log_warning "docker pull $dst failed (kubelet will retry)"
+      fi
+    fi
+    if docker image inspect "$dst" >/dev/null 2>&1; then
+      log_info "kind load $dst into cluster $cluster_name (offline)..."
+      kind load docker-image "$dst" --name "$cluster_name" || log_warning "kind load $dst failed"
+    fi
+  done
+
+  # Distractor images (only used when deploy_lightweight_distractors is
+  # uncommented).  Still pre-load defensively so future re-enable works.
+  REQUIRED_IMAGES=(oliver006/redis_exporter:v1.45.0 nginx:1.21-alpine)
+  for _img in "${REQUIRED_IMAGES[@]}"; do
+    if ! docker image inspect "$_img" >/dev/null 2>&1; then
+      log_info "Host docker cache missing $_img; pulling once..."
+      docker pull "$_img" || log_warning "docker pull $_img failed (will let kubelet retry)"
+    fi
+    if docker image inspect "$_img" >/dev/null 2>&1; then
+      log_info "kind load $_img into cluster $cluster_name (offline)..."
+      kind load docker-image "$_img" --name "$cluster_name" || log_warning "kind load $_img failed"
+    fi
+  done
+
   # Create namespace
   create_namespace "$configpath"
   

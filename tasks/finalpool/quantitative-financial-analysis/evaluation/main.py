@@ -5,6 +5,7 @@ import os
 
 from .check_content import check_content
 from utils.general.helper import read_json
+from utils.evaluation.retry import grade_with_retry
 
 # Add project root directory to sys.path
 from configs.token_key_session import all_token_key_session
@@ -21,9 +22,12 @@ if __name__ == "__main__":
     # Get Notion token
     notion_token = all_token_key_session.notion_integration_key
 
-    Pass, Error = check_content(
-        groundtruth_workspace=args.groundtruth_workspace,
-        notion_token=notion_token
+    Pass, Error = grade_with_retry(
+        lambda: check_content(
+            groundtruth_workspace=args.groundtruth_workspace,
+            notion_token=notion_token,
+        ),
+        max_attempts=4,
     )
     if not Pass:
         print("Content check failed:", Error)

@@ -256,6 +256,23 @@ start_operation() {
 
   create_cluster "${cluster_name}" "$configpath"
   verify_cluster "${cluster_name}" "$configpath"
+
+  # Pre-load images from the host's local docker cache into the kind
+  # cluster's containerd registry so apply_resources doesn't pull from
+  # Docker Hub.  Docker Hub anonymous-pull rate limit (~100/6h per IP)
+  # is easily exhausted on a busy multi-instance host.  After the
+  # first run on a given host, the images stay cached and every
+  # subsequent call is fully offline.
+  REQUIRED_IMAGES=(nginx:1.20-alpine)
+  for _img in "${REQUIRED_IMAGES[@]}"; do
+    if ! docker image inspect "$_img" >/dev/null 2>&1; then
+      log_info "Host docker cache missing $_img; pulling once..."
+      docker pull "$_img" || log_warning "docker pull $_img failed (will let kubelet retry)"
+    fi
+    log_info "kind load $_img into cluster $cluster_name (offline)..."
+    kind load docker-image "$_img" --name "$cluster_name" || log_warning "kind load $_img failed"
+  done
+
   apply_resources "$configpath"
   
   # Wait for all deployments to become ready

@@ -12,12 +12,33 @@ def parse_iso_time(iso_string):
     """
     if iso_string.endswith('Z'):
         iso_string = iso_string[:-1] + '+00:00'
-    
+
     try:
         return datetime.fromisoformat(iso_string)
     except:
         import dateutil.parser
         return dateutil.parser.isoparse(iso_string)
+
+
+def iso_times_equal(a: str, b: str) -> bool:
+    """Return True iff two ISO-8601 timestamp strings represent the same
+    absolute moment, regardless of how the timezone is encoded.
+
+    Google Calendar's API normalises ``dateTime`` fields to UTC (``Z``
+    suffix) on read even when the event was created with a localized
+    offset like ``+08:00`` and an explicit ``timeZone: Asia/Hong_Kong``.
+    A naive ``==`` between the grader's expected ``+08:00`` string and
+    Google's returned ``Z`` string fails for semantically-identical
+    moments, which previously caused Checkpoint 0 to register the
+    seeded pre-existing events as "not found" even when they had been
+    correctly created by ``setup_calendar_events`` during preprocess.
+    """
+    if a == b:
+        return True
+    try:
+        return parse_iso_time(a) == parse_iso_time(b)
+    except Exception:
+        return False
 
 def extract_events(events_response):
     """Extract events from API response"""
@@ -208,7 +229,11 @@ async def main(args):
         
         # find if the event is in the pre existing events
         for i, pre_existing_event in enumerate(pre_existing_events):
-            if pre_existing_event['summary'] == event['summary'] and pre_existing_event['start_time'] == event['start']['dateTime'] and pre_existing_event['end_time'] == event['end']['dateTime']:
+            if (
+                pre_existing_event['summary'] == event['summary']
+                and iso_times_equal(pre_existing_event['start_time'], event['start']['dateTime'])
+                and iso_times_equal(pre_existing_event['end_time'], event['end']['dateTime'])
+            ):
                 found[i] = True
                 break
 

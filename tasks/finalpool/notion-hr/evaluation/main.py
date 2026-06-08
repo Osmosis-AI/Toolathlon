@@ -7,6 +7,7 @@ from email.header import decode_header
 from typing import Dict, List, Tuple
 from configs.token_key_session import all_token_key_session
 from utils.general.helper import normalize_str
+from utils.evaluation.retry import grade_with_retry
 
 # Import Notion utility functions
 from utils.app_specific.notion.ops import (
@@ -331,7 +332,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # 1. Check Notion
-    notion_check_flag, notion_check_msg = check_notion()
+    notion_check_flag, notion_check_msg = grade_with_retry(
+        lambda: check_notion(),
+        max_attempts=4,
+    )
     if not notion_check_flag:
         print("\n❌ Notion check failed: ", notion_check_msg)
         exit(1)

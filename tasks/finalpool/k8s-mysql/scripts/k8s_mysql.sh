@@ -335,15 +335,66 @@ start_operation() {
   echo ""
   log_info "========== Processing cluster ${cluster_name} =========="
 
-  create_cluster "${cluster_name}" "$configpath"
-  verify_cluster "${cluster_name}" "$configpath"
-  apply_resources "$configpath"
+  # Propagate exit codes — a silent failure here used to leave preprocess
+  # reporting success while the cluster didn't exist, which then
+  # deadlocked the k8s MCP server at gateway_boot.
+  if ! create_cluster "${cluster_name}" "$configpath"; then
+    log_error "Aborting start_operation: kind create cluster failed for ${cluster_name}"
+    return 1
+  fi
+  if ! verify_cluster "${cluster_name}" "$configpath"; then
+    log_error "Aborting start_operation: cluster verification failed for ${cluster_name}"
+    return 1
+  fi
+
+  # Pre-load images from the host's local docker cache into the kind
+  # cluster's containerd registry.  Without this, the StatefulSet's pods
+  # would pull mysql:8.4 / nginx:1.14 from Docker Hub directly, which
+  # frequently hits the anonymous-pull rate limit (~100/6h per IP) on a
+  # busy multi-instance host and leaves rollout status hanging forever
+  # in ImagePullBackOff.
+  #
+  # Semantics: ``docker image inspect`` checks if the host already has
+  # the tagged image (it almost always does after first run; tagged
+  # images survive Toolathlon's gentle ``docker image prune -f`` which
+  # only removes dangling layers).  If absent, pull once.  Then
+  # ``kind load docker-image`` is a local-only copy from host docker
+  # cache into the kind node's containerd — no network call.
+  REQUIRED_IMAGES=(mysql:8.4 nginx:1.14)
+  for _img in "${REQUIRED_IMAGES[@]}"; do
+    if ! docker image inspect "$_img" >/dev/null 2>&1; then
+      log_info "Host docker cache missing $_img; pulling once..."
+      if ! docker pull "$_img"; then
+        log_error "Failed to pull $_img from registry"
+        return 1
+      fi
+    fi
+    log_info "kind load $_img into cluster $cluster_name (offline)..."
+    if ! kind load docker-image "$_img" --name "$cluster_name"; then
+      log_error "kind load failed for $_img"
+      return 1
+    fi
+  done
+
+  if ! apply_resources "$configpath"; then
+    log_error "Aborting start_operation: kubectl apply failed"
+    return 1
+  fi
 
   log_info "========== Initializing MySQL-f1 database =========="
   export MYSQL_ROOT_PASSWORD="mcpbench0606"   # Or load securely as needed
 
-  # Ensure MySQL StatefulSet is ready
-  kubectl --kubeconfig="$configpath" -n data rollout status statefulset/mysql-f1
+  # Ensure MySQL StatefulSet is ready — bounded wait so an
+  # ImagePullBackOff loop doesn't hang preprocess indefinitely.  5 min
+  # is more than enough for a healthy rollout (image is pre-loaded,
+  # mysql startup ~30s); anything beyond that is a real failure.
+  if ! kubectl --kubeconfig="$configpath" -n data rollout status statefulset/mysql-f1 --timeout=300s; then
+    log_error "mysql-f1 rollout did not become ready within 5min — preprocess aborting"
+    log_info "Pod state for diagnostics:"
+    kubectl --kubeconfig="$configpath" -n data get pods -o wide --no-headers 2>/dev/null || true
+    kubectl --kubeconfig="$configpath" -n data describe pod mysql-f1-0 2>/dev/null | grep -E "Image|Pulling|Failed|Reason" | head -10 || true
+    return 1
+  fi
 
   # Ensure csv-loader Pod is ready
   kubectl --kubeconfig="$configpath" -n data wait --for=condition=Ready pod/csv-loader --timeout=120s
