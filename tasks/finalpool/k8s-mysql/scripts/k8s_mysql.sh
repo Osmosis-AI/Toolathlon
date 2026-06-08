@@ -154,21 +154,108 @@ cleanup_config_files() {
   fi
 }
 
-# Create cluster
+# Aggressively scrub any partial state for ``cluster_name`` so a fresh
+# create has the cleanest possible starting point.  ``kind delete``
+# alone often misses orphan state when the create failed mid-init:
+#
+#   - kind's bookkeeping still lists the cluster (next create errors
+#     "node(s) already exist for a cluster with the name X")
+#   - the ${cluster_name}-control-plane docker container hangs around
+#   - the ``kind`` docker network keeps a stale endpoint with the
+#     control-plane's name, blocking a new control-plane from joining
+#     ("endpoint with name X already exists in network kind")
+#
+# Three passes, all best-effort (no early-return on any single failure):
+#   1. ``kind delete`` (the polite way, often suffices)
+#   2. explicit ``docker rm -f`` of the expected control-plane name
+#   3. ``docker network disconnect -f`` from the shared ``kind`` network
+_scrub_partial_kind_state() {
+  local cluster_name=$1
+  local node="${cluster_name}-control-plane"
+  kind delete cluster --name "$cluster_name" >/dev/null 2>&1 || true
+  docker rm -f "$node" >/dev/null 2>&1 || true
+  docker network disconnect -f kind "$node" >/dev/null 2>&1 || true
+}
+
+# Create cluster.
+#
+# Retries on intermittent failure.  ``kind create cluster`` is racy
+# when multiple Toolathlon instances share the same docker daemon:
+# the kubeadm-init / CNI-install steps run via ``docker exec`` and
+# have been observed to be externally stopped (exit 137 with
+# ``hasBeenManuallyStopped=true`` in dockerd log) during concurrent
+# kind operations from parallel instances.  Memory is not the cause
+# (host had 200GB free at the time of failure); it's a
+# kind/docker-exec orchestration race.  3 attempts with growing
+# backoff and aggressive partial-state cleanup between attempts
+# survives this.
 create_cluster() {
   local cluster_name=$1
   local config_path=$2
-  log_info "Create cluster: $cluster_name"
-  if KIND_EXPERIMENTAL_PROVIDER=$podman_or_docker kind create cluster --name "$cluster_name" --kubeconfig "$config_path"; then
-    log_info "Cluster $cluster_name created successfully"
-    return 0
-  else
-    log_error "Cluster $cluster_name creation failed"
-    return 1
-  fi
+  local _attempt
+  for _attempt in 1 2 3; do
+    log_info "Create cluster: $cluster_name (attempt $_attempt/3)"
+    # Always start each attempt with clean state — including the very
+    # first, in case a prior preprocess crash left leftovers behind.
+    _scrub_partial_kind_state "$cluster_name"
+    if KIND_EXPERIMENTAL_PROVIDER=$podman_or_docker kind create cluster \
+         --name "$cluster_name" --kubeconfig "$config_path"; then
+      log_info "Cluster $cluster_name created successfully"
+      return 0
+    fi
+    log_warning "Cluster $cluster_name create attempt $_attempt failed"
+    if [ "$_attempt" -lt 3 ]; then
+      local _backoff=$(( 15 * _attempt ))
+      log_info "Retrying in ${_backoff}s after partial-state scrub..."
+      sleep "$_backoff"
+    fi
+  done
+  log_error "Cluster $cluster_name creation failed after 3 attempts"
+  return 1
 }
 
-# Verify cluster
+# Load a host-cached image into the kind cluster's containerd.
+#
+# Avoids ``kind load docker-image`` because that internally runs
+# ``ctr ... images import --all-platforms --digests`` which fails for
+# multi-arch manifest list images (e.g. ``mysql:8.4``) with
+# ``ctr: content digest sha256:...: not found`` — the host docker
+# daemon only has the per-platform layers, not every manifest digest
+# the manifest list references.
+#
+# Instead, pipe ``docker save`` straight into ``ctr images import``
+# WITHOUT ``--all-platforms``.  This imports only the platform actually
+# present on the host (linux/amd64 here), which is exactly what the
+# kind node can run.
+kind_load_via_ctr() {
+  local cluster_name=$1
+  local image=$2
+  local node="${cluster_name}-control-plane"
+  log_info "Loading $image into $node (via ctr import, no --all-platforms)..."
+  local _out
+  # Don't silence stderr — when this fails we need to see why
+  _out=$(docker save "$image" 2>&1 | docker exec -i "$node" ctr -n k8s.io images import - 2>&1)
+  local _rc=$?
+  if [ "$_rc" -eq 0 ]; then
+    log_info "  loaded $image into containerd on $node"
+    return 0
+  fi
+  log_warning "  ctr import of $image into $node failed (rc=$_rc): ${_out:0:400}"
+  return 1
+}
+
+# Verify cluster and WAIT for kube-system to be fully ready.
+#
+# The cluster API server is up within seconds of ``kind create``, but
+# the kube-system pods (kube-apiserver readiness probes, coredns,
+# kube-controller-manager, kube-scheduler, kindnetd CNI agent,
+# kube-proxy, local-path-provisioner) take 30-90s more.  Applying
+# user resources before they're ready frequently fails with API
+# errors (admission webhook timeouts, default storage class missing,
+# etc.).  The previous 60s timeout was too short under host load and
+# just produced a warning; we now wait up to 5 min AND require it
+# (return non-zero on timeout) so the caller can decide to retry the
+# whole bootstrap rather than racing forward to apply_resources.
 verify_cluster() {
   local cluster_name=$1
   local config_path=$2
@@ -177,24 +264,28 @@ verify_cluster() {
     log_error "Configuration file does not exist: $config_path"
     return 1
   fi
-  if kubectl --kubeconfig="$config_path" cluster-info &>/dev/null; then
-    log_info "Cluster $cluster_name is running normally"
-    nodes=$(kubectl --kubeconfig="$config_path" get nodes -o wide 2>/dev/null)
-    if [ $? -eq 0 ]; then
-      echo "Node information:"
-      echo "$nodes"
-    fi
-    kubectl --kubeconfig="$config_path" wait --for=condition=Ready pods --all -n kube-system --timeout=60s &>/dev/null
-    if [ $? -eq 0 ]; then
-      log_info "All system pods are ready"
-    else
-      log_warning "Some system pods are not ready"
-    fi
-    return 0
-  else
+  if ! kubectl --kubeconfig="$config_path" cluster-info &>/dev/null; then
     log_error "Cannot connect to cluster $cluster_name"
     return 1
   fi
+  log_info "Cluster $cluster_name API is reachable"
+  nodes=$(kubectl --kubeconfig="$config_path" get nodes -o wide 2>/dev/null)
+  if [ $? -eq 0 ]; then
+    echo "Node information:"
+    echo "$nodes"
+  fi
+  # Wait up to 5 min for ALL kube-system pods to be Ready.  This is
+  # the gate that ensures kubectl apply downstream won't trip over a
+  # half-bootstrapped control plane.
+  log_info "Waiting (up to 5min) for kube-system pods to become Ready..."
+  if kubectl --kubeconfig="$config_path" wait --for=condition=Ready pods \
+        --all -n kube-system --timeout=300s 2>&1 | tail -3; then
+    log_info "All kube-system pods are Ready"
+    return 0
+  fi
+  log_error "kube-system pods did not become Ready within 5min"
+  kubectl --kubeconfig="$config_path" get pods -n kube-system 2>/dev/null | tail -10
+  return 1
 }
 
 # Show inotify status
@@ -209,13 +300,31 @@ apply_resources() {
   local config_path=$1
   log_info "Applying resources from $resource_yaml"
   export KUBECONFIG="$config_path"
-  if kubectl apply -f "$resource_yaml"; then
-    log_info "Resources applied successfully"
-    return 0
-  else
-    log_error "Failed to apply resources"
-    return 1
-  fi
+  # Retry on transient API errors — even after kube-system Ready, the
+  # API server can briefly 5xx during the first few seconds of admitting
+  # heavy resource sets (StatefulSet + headless Service + multiple
+  # ConfigMaps).  3 attempts with growing backoff handles this without
+  # masking real schema errors (which would fail every attempt).
+  local _attempt
+  for _attempt in 1 2 3; do
+    local _out
+    _out=$(kubectl apply -f "$resource_yaml" 2>&1)
+    local _rc=$?
+    if [ "$_rc" -eq 0 ]; then
+      log_info "Resources applied successfully (attempt $_attempt)"
+      printf '%s\n' "$_out" | tail -5
+      return 0
+    fi
+    log_warning "kubectl apply attempt $_attempt failed (rc=$_rc):"
+    printf '%s\n' "$_out" | tail -10
+    if [ "$_attempt" -lt 3 ]; then
+      local _backoff=$(( 10 * _attempt ))
+      log_info "Retrying apply in ${_backoff}s..."
+      sleep "$_backoff"
+    fi
+  done
+  log_error "Failed to apply resources after 3 attempts"
+  return 1
 }
 
 load_f1_csv() {
@@ -462,11 +571,12 @@ start_operation() {
         return 1
       fi
     fi
-    log_info "kind load $_img into cluster $cluster_name (offline)..."
-    if ! kind load docker-image "$_img" --name "$cluster_name"; then
-      log_error "kind load failed for $_img"
-      return 1
-    fi
+    # Use ctr-import workaround instead of ``kind load docker-image``
+    # which fails on multi-arch manifest images (see kind_load_via_ctr
+    # comment).  Best-effort: on import failure we log a warning and
+    # proceed so kubelet's fallback pull at least has a chance.
+    kind_load_via_ctr "$cluster_name" "$_img" || \
+      log_warning "Image preload failed for $_img — will rely on kubelet pull"
   done
 
   if ! apply_resources "$configpath"; then
