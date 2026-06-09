@@ -47,6 +47,11 @@ data:
     local_infile=1
     character-set-server=utf8mb4
     collation-server=utf8mb4_0900_ai_ci
+    # Native AIO via io_setup() fails with EAGAIN when many mysqld
+    # processes share the host (system-wide fs.aio-max-nr exhausted) —
+    # InnoDB then aborts init.  Simulated AIO has a small perf cost but
+    # is resilient to host-level AIO context exhaustion.
+    innodb_use_native_aio=0
 
 # =========================
 # data: MySQL-f1 Service & StatefulSet (Persistent Storage)
@@ -88,7 +93,23 @@ spec:
       containers:
         - name: mysql
           image: mysql:8.4
-          args: ["--local-infile=ON"]
+          # Recovery wrapper: if a previous mysqld --initialize crashed after
+          # writing auto.cnf but before bootstrapping the `mysql/` system
+          # schema, every subsequent restart aborts with "data directory has
+          # files in it. Aborting." (CrashLoopBackOff forever).  We can't use
+          # an initContainer because those only run at pod creation, not on
+          # main-container restart within the same pod.  So we wrap the
+          # upstream docker-entrypoint.sh: detect the poisoned state and
+          # wipe the dir before delegating.  On the happy path this no-ops.
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -eu
+              if [ -n "$(ls -A /var/lib/mysql 2>/dev/null)" ] && [ ! -d /var/lib/mysql/mysql ]; then
+                echo "[recover] poisoned mysql data dir detected; wiping /var/lib/mysql/*"
+                rm -rf /var/lib/mysql/* /var/lib/mysql/.[!.]* 2>/dev/null || true
+              fi
+              exec /usr/local/bin/docker-entrypoint.sh mysqld --local-infile=ON
           env:
             - name: MYSQL_ROOT_PASSWORD
               valueFrom:
