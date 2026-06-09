@@ -82,7 +82,9 @@ STATE_FILE = Path(os.environ.get(
 # rationale at the top, callers should treat these as TOKEN-scoped.
 MAX_CONCURRENT_HEAVY_TASKS = 3
 MAX_HEAVY_TASKS_PER_HOUR = 40
-REQUIRE_QUOTA_REMAINING = 50
+# Lower than the typical-task call count (~10) so a token at 60/h
+# still gets a few admissions per reset window before refusing.
+REQUIRE_QUOTA_REMAINING = 15
 
 # Rolling window for "recent_starts" pruning + counting.
 WINDOW_SECONDS = 3600.0
