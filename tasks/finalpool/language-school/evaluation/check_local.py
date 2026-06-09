@@ -29,7 +29,7 @@ def compare_element(agent_element, groundtruth_element):
 def check_local(agent_workspace, groundtruth_workspace):
     """Check if agent generated file matches groundtruth for language requirements using hashlib"""
 
-    agent_file = os.path.join(agent_workspace, "cs_top10_us_2025.xlsx")
+    agent_file = os.path.join(agent_workspace, "cs_top10_us.xlsx")
 
     # check if generated and groundtruth file exists.
     if not os.path.exists(agent_file):
@@ -55,7 +55,8 @@ def check_local(agent_workspace, groundtruth_workspace):
 
     university_info_rest = [
         {"University":['massachusettsinstituteoftechnology','mit'],
-            "City":"Cambridge","Ranking":1,
+            "City":"Cambridge",
+            "Ranking":1,
             "Toefl_accepted":"Yes",
             "Toefl_min_score":100,
             "Ielts_accepted":"Yes",
@@ -70,7 +71,7 @@ def check_local(agent_workspace, groundtruth_workspace):
             "Ielts_accepted":"Yes",
             "Ielts_min_score":7,
             "Application_fee":125,
-            "Application_ddl":"2025-12-02T23:59:00-05:00"},
+            "Application_ddl":"2025-12-02T23:59:00-08:00"},
         {"University":['carnegiemellon','cmu'],
             "City":"Pittsburgh",
             "Ranking":3,
@@ -84,7 +85,16 @@ def check_local(agent_workspace, groundtruth_workspace):
             # which doesn't appear in any official CMU source.
             "Ielts_min_score":7,
             "Application_fee":100,
-            "Application_ddl":"2025-12-10T15:00:00-05:00"},
+            "Application_ddl":"2026-12-09T15:00:00-05:00"},
+        {"University":['californiaberkeley','ucb'],
+            "City":"Berkeley",
+            "Ranking":6,
+            "Toefl_accepted":"Yes",
+            "Toefl_min_score":90,
+            "Ielts_accepted":"Yes",
+            "Ielts_min_score":7,
+            "Application_fee":155,
+            "Application_ddl":"2025-12-01T20:59:00-08:00"},
         {"University":['harvard'],
             "City":"Cambridge",
             "Ranking":7,
@@ -94,15 +104,6 @@ def check_local(agent_workspace, groundtruth_workspace):
             "Ielts_min_score":6.5,
             "Application_fee":105,
             "Application_ddl":"2025-12-01T17:00:00-05:00"},
-        {"University":['californiaberkeley','ucb'],
-            "City":"Berkeley",
-            "Ranking":8,
-            "Toefl_accepted":"Yes",
-            "Toefl_min_score":90,
-            "Ielts_accepted":"Yes",
-            "Ielts_min_score":7,
-            "Application_fee":155,
-            "Application_ddl":"2025-12-01T20:59:00-08:00"}
     ]
 
     # new version
@@ -126,7 +127,7 @@ def check_local(agent_workspace, groundtruth_workspace):
             groundtruth_element = university_info_rest[university_idx][col]
             
             if col == 'Application_ddl':
-                if not compare_iso_time(agent_element, groundtruth_element,date_only=True):
+                if not compare_iso_time(agent_element, groundtruth_element,date_only=True,except_year=True):
                     return False, f"Application deadline mismatch at index {row_idx}[{col}]: expected '{groundtruth_element}', got '{agent_element}'"
             else:
                 # if the groundtruth element is a list, check if any element in the list is equal to the agent element
