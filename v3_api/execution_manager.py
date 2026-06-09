@@ -390,6 +390,15 @@ class ExecutionManager:
                     f"active={self.active_count()}/{self.max_active_executions}"
                 )
 
+        # Deregister from the GitHub admission gate.  Best-effort: any
+        # IO or lock failure here is swallowed because the entry will
+        # age out via the gate's STALE_CONCURRENT_SECONDS safety-net.
+        try:
+            from .github_admission import deregister_admission
+            deregister_admission(execution.execution_id)
+        except Exception as e:
+            log(f"github_admission deregister for {execution.execution_id} failed: {e!r}")
+
         # Container teardown happens outside manager_lock — docker rm is slow.
         # Import lazily to avoid a circular dep.
         from .container_mgr import teardown_container

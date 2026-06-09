@@ -41,6 +41,11 @@ from .execution_manager import (
     INFRA_RETRY_AFTER_SECONDS,
     manager,
 )
+from .github_admission import (
+    check_and_register_admission,
+    deregister_admission,
+    GITHUB_HEAVY_TASKS,
+)
 from .models import (
     CallToolRequest,
     CallToolResponse,
@@ -244,6 +249,45 @@ async def start_task_endpoint(task_id: str, req: StartTaskRequest):
 
     ex = admission.execution
     assert ex is not None
+
+    # ── GitHub admission gate ──────────────────────────────────────
+    #
+    # For github-heavy tasks, enforce per-token-login caps to avoid
+    # GitHub's abuse-detection throttling (which has already
+    # downgraded one of our PATs from 5000/h to 60/h and outright
+    # suspended others).  Applied AFTER core capacity/lock admission
+    # so that gate failures don't waste capacity; if refused we
+    # immediately cleanup the just-admitted exec and surface 503.
+    #
+    # Non-heavy tasks are a fast no-op inside check_and_register_admission.
+    if task_id in GITHUB_HEAVY_TASKS:
+        try:
+            from configs.token_key_session import all_token_key_session as _tks
+            _gh_token = getattr(_tks, "github_token", None)
+        except Exception:
+            _gh_token = None
+        if _gh_token:
+            refusal = check_and_register_admission(
+                task_id=task_id,
+                exec_id=ex.execution_id,
+                token=_gh_token,
+            )
+            if refusal is not None:
+                # Roll back the admission so locks are released and
+                # capacity is freed.  ``cleanup_execution`` is the
+                # single converging cleanup path.
+                await manager.cleanup_execution(
+                    ex, reason=f"github_admission_refused:{refusal.reason}"
+                )
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "reason": refusal.reason,
+                        "retry_after_s": refusal.retry_after_s,
+                        **refusal.detail,
+                    },
+                )
+
     spawn_setup(ex)
 
     return StartTaskAccepted(
