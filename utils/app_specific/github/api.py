@@ -112,6 +112,39 @@ class GitHubRateLimitError(RequestException):
         super().__init__(message)
 
 
+class GitHubQuotaExhaustedError(RuntimeError):
+    """Rate-limit reset window exceeds our retry budget.
+
+    When GitHub's ``X-RateLimit-Reset`` is N minutes away and N >
+    ``RATE_LIMIT_TOTAL_WAIT_CAP_SECONDS / 60``, the retry decorator
+    cannot recover within its delay budget — it would either waste
+    15 min of wall time blocking on a sleep that's still going to
+    fail, or give up immediately when ``stop_after_delay`` checks
+    after the wait.  Either way the call is doomed.
+
+    This exception is RAISED INSTEAD of ``GitHubRateLimitError`` in
+    that doomed case, and is NOT a ``RequestException`` — so the
+    retry filter ignores it and it propagates immediately to the
+    caller.  Preprocess fails fast with a clear "GitHub quota is
+    exhausted for the next N minutes" message, freeing the slot
+    instead of holding it during a futile wait.
+
+    Note: the message is intentionally non-cryptic so operators can
+    distinguish "GitHub-side quota issue, retry the task later" from
+    "real bug, look at the trace".
+    """
+
+    def __init__(self, wait_seconds: float, status_code: int):
+        self.wait_seconds = wait_seconds
+        self.status_code = status_code
+        mins = wait_seconds / 60.0
+        super().__init__(
+            f"GitHub primary rate limit exhausted; reset is {wait_seconds:.0f}s "
+            f"({mins:.1f} min) away, beyond our {RATE_LIMIT_TOTAL_WAIT_CAP_SECONDS//60} min "
+            f"retry cap.  Failing fast — retry this task after the reset."
+        )
+
+
 def _body_indicates_rate_limit(response: requests.Response) -> bool:
     """Fallback heuristic — some rate-limit responses arrive without
     the standard headers (e.g. GitHub Enterprise, certain search
@@ -216,14 +249,36 @@ def _parse_rate_limit_wait(response: requests.Response) -> Optional[GitHubRateLi
 
 
 def _check_rate_limit(response: requests.Response) -> None:
-    """Raise ``GitHubRateLimitError`` if the response is a rate-limit
-    failure; do nothing otherwise.  Call this BEFORE any
-    ``raise RuntimeError(...)`` so we keep the typed header context
-    that the retry decorator needs to schedule the right wait.
+    """Inspect ``response`` and raise the right typed exception when
+    it's a GitHub rate-limit failure.  Three cases:
+
+      1. Not a rate limit → return, caller proceeds with normal flow.
+      2. Rate limited, reset window ≤ our retry cap → raise
+         ``GitHubRateLimitError`` (a ``RequestException``) so the
+         retry decorator catches it and waits per ``_wait_for_github``.
+      3. Rate limited, reset window > our retry cap → raise
+         ``GitHubQuotaExhaustedError`` (a ``RuntimeError``) which is
+         NOT a ``RequestException`` and therefore PROPAGATES
+         IMMEDIATELY past the retry filter.  Saves 15 min of pointless
+         waiting on a doomed call when the bucket isn't refilling
+         until well outside our budget.
+
+    Call this BEFORE any generic ``raise RuntimeError(...)`` so we
+    keep the typed header context the retry decorator needs.
     """
     err = _parse_rate_limit_wait(response)
-    if err is not None:
-        raise err
+    if err is None:
+        return
+    # Primary rate limit with a reset window we can't ride out — fail
+    # fast.  ``scope == "secondary"`` (typically Retry-After ≤ a few
+    # minutes) is excluded from this short-circuit because secondary
+    # waits are short enough to fit our budget after the multiplier.
+    if err.scope == "primary" and err.wait_seconds > RATE_LIMIT_TOTAL_WAIT_CAP_SECONDS:
+        raise GitHubQuotaExhaustedError(
+            wait_seconds=err.wait_seconds,
+            status_code=err.status_code,
+        )
+    raise err
 
 
 def _wait_for_github(retry_state) -> float:
