@@ -432,10 +432,10 @@ start_operation() {
   log_info "========== Processing cluster ${cluster_name} =========="
 
   # Create cluster
-  create_cluster "${cluster_name}" "$configpath"
-  verify_cluster "${cluster_name}" "$configpath"
+  create_cluster "${cluster_name}" "$configpath" || return 1
+  verify_cluster "${cluster_name}" "$configpath" || return 1
 
-  # Pre-load images from host docker cache into kind cluster.  The
+  # Pre-load images from the host image cache into kind cluster.  The
   # bitnami/redis chart 19.0.0 pulls bitnamilegacy/redis:<tag> via the
   # --set image.repository=bitnamilegacy/redis override.  Bitnami no
   # longer publishes legacy images to Docker Hub for older versions, so
@@ -456,18 +456,18 @@ start_operation() {
   for _name_tag in "${BITNAMILEGACY_IMAGES[@]}"; do
     src="bitnami/${_name_tag}"
     dst="bitnamilegacy/${_name_tag}"
-    if ! docker image inspect "$dst" >/dev/null 2>&1; then
-      if docker image inspect "$src" >/dev/null 2>&1; then
+    if ! "$podman_or_docker" image inspect "$dst" >/dev/null 2>&1; then
+      if "$podman_or_docker" image inspect "$src" >/dev/null 2>&1; then
         log_info "Retag $src → $dst (same SHA, bitnamilegacy namespace)..."
-        docker tag "$src" "$dst" || log_warning "docker tag failed for $src → $dst"
+        "$podman_or_docker" tag "$src" "$dst" || log_warning "$podman_or_docker tag failed for $src → $dst"
       else
-        log_info "Host docker cache missing $dst (no $src to retag); pulling once..."
-        docker pull "$dst" || log_warning "docker pull $dst failed (kubelet will retry)"
+        log_info "Host image cache missing $dst (no $src to retag); pulling once..."
+        "$podman_or_docker" pull "$dst" || log_warning "$podman_or_docker pull $dst failed (kubelet will retry)"
       fi
     fi
-    if docker image inspect "$dst" >/dev/null 2>&1; then
+    if "$podman_or_docker" image inspect "$dst" >/dev/null 2>&1; then
       log_info "kind load $dst into cluster $cluster_name (offline)..."
-      kind load docker-image "$dst" --name "$cluster_name" || log_warning "kind load $dst failed"
+      KIND_EXPERIMENTAL_PROVIDER="$podman_or_docker" kind load docker-image "$dst" --name "$cluster_name" || log_warning "kind load $dst failed"
     fi
   done
 
@@ -475,24 +475,24 @@ start_operation() {
   # uncommented).  Still pre-load defensively so future re-enable works.
   REQUIRED_IMAGES=(oliver006/redis_exporter:v1.45.0 nginx:1.21-alpine)
   for _img in "${REQUIRED_IMAGES[@]}"; do
-    if ! docker image inspect "$_img" >/dev/null 2>&1; then
-      log_info "Host docker cache missing $_img; pulling once..."
-      docker pull "$_img" || log_warning "docker pull $_img failed (will let kubelet retry)"
+    if ! "$podman_or_docker" image inspect "$_img" >/dev/null 2>&1; then
+      log_info "Host image cache missing $_img; pulling once..."
+      "$podman_or_docker" pull "$_img" || log_warning "$podman_or_docker pull $_img failed (will let kubelet retry)"
     fi
-    if docker image inspect "$_img" >/dev/null 2>&1; then
+    if "$podman_or_docker" image inspect "$_img" >/dev/null 2>&1; then
       log_info "kind load $_img into cluster $cluster_name (offline)..."
-      kind load docker-image "$_img" --name "$cluster_name" || log_warning "kind load $_img failed"
+      KIND_EXPERIMENTAL_PROVIDER="$podman_or_docker" kind load docker-image "$_img" --name "$cluster_name" || log_warning "kind load $_img failed"
     fi
   done
 
   # Create namespace
-  create_namespace "$configpath"
+  create_namespace "$configpath" || return 1
   
   # Setup Helm
-  setup_helm "$configpath"
+  setup_helm "$configpath" || return 1
   
   # Deploy Redis with Helm
-  deploy_redis_helm "$configpath"
+  deploy_redis_helm "$configpath" || return 1
   
   # Deploy lightweight distractors
   # With podman, adding distractors may cause memory exhausted restarts, so commented out for now
@@ -503,7 +503,7 @@ start_operation() {
   # copy_values_to_home
   
   # Copy config to backup directory
-  cp "$configpath" "$backup_configpath"
+  cp "$configpath" "$backup_configpath" || return 1
 
   log_info "========== Redis Helm deployment completed =========="
   log_info "Cluster: $cluster_name"  # Should add this line
