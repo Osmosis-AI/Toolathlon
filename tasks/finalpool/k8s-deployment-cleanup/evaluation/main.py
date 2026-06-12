@@ -3,12 +3,13 @@ import os
 import json
 import subprocess
 import re
+import time
 from datetime import datetime
 from typing import Dict, List, Tuple, Any
 
 from utils.general.helper import normalize_str, read_json, print_color
 from utils.app_specific.poste.ops import find_emails_from_sender, mailbox_has_email_matching_body
-from utils.evaluation.retry import grade_with_retry
+from utils.evaluation.retry import DEFAULT_MAX_ATTEMPTS, DEFAULT_POLL_S, grade_with_retry
 
 
 VERBOSE = False
@@ -569,7 +570,12 @@ def main() -> int:
     # 2.2 Every shouldnt_receive must NOT have emails from sender
     for recv_email, cfg in shouldnt_receive_emails.items():
         imap_cfg = {"email": recv_email, **cfg}
-        emails = find_emails_from_sender(imap_cfg, sender_query_for_imap, folder="INBOX", fetch_limit=200)
+        emails = []
+        for attempt in range(1, DEFAULT_MAX_ATTEMPTS + 1):
+            emails = find_emails_from_sender(imap_cfg, sender_query_for_imap, folder="INBOX", fetch_limit=200)
+            if emails or attempt >= DEFAULT_MAX_ATTEMPTS:
+                break
+            time.sleep(DEFAULT_POLL_S)
         none_found = len(emails) == 0
         email_details["shouldnt_receive"][recv_email] = {
             "none_found": none_found,
