@@ -45,7 +45,11 @@ def search_structured_log_payload(transaction_id="T8492XJ3", project_id="mcp-ben
     }
 
     # Build filter query for logs containing the transaction_id
-    filter_query = f'logName="projects/{project_id}/logs/{log_bucket_name}" AND NOT jsonPayload.logging\\.googleapis\\.com/diagnostic AND jsonPayload.transaction_id="{transaction_id}" OR textPayload:"{transaction_id}"'
+    filter_query = (
+        f'logName="projects/{project_id}/logs/{log_bucket_name}" '
+        f'AND NOT jsonPayload.logging\\.googleapis\\.com/diagnostic '
+        f'AND (jsonPayload.transaction_id="{transaction_id}" OR textPayload:"{transaction_id}")'
+    )
 
     # add time range filter
     default_timezone = datetime.now().astimezone().tzinfo
