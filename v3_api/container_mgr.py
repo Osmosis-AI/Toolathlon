@@ -538,7 +538,27 @@ async def _container_watchdog(execution: ExecutionState) -> None:
                 pass
         raise
     except Exception as e:
+        # ``docker wait`` itself failed to set up or run — e.g. file
+        # descriptor exhaustion at subprocess spawn, docker daemon
+        # restart mid-wait, transient OCI runtime issues.  Before the
+        # cleanup-on-error fix this just returned silently, leaving
+        # the ExecutionState in manager.executions even though no one
+        # is watching the container anymore.  When the container then
+        # died (OOM, external rm, daemon-side cleanup, etc.) v3 had no
+        # signal to clean up — the exec became a "ghost" holding a
+        # capacity slot until the ~30-min idle reaper caught it.
+        # Calling cleanup_execution here closes the gap: even if the
+        # container is still alive (which would be unusual), the
+        # follow-up teardown_container will reconcile it.
         log(f"Watchdog for {execution.execution_id} crashed: {e!r}")
+        try:
+            await manager.cleanup_execution(
+                execution, reason=f"watchdog_error:{type(e).__name__}"
+            )
+        except Exception as ce:
+            # If cleanup_execution also raises (extremely unlikely),
+            # log and accept the leak rather than crashing the task.
+            log(f"Watchdog cleanup_execution for {execution.execution_id} failed: {ce!r}")
         return
 
     # Container is gone.  Reconcile (cleanup_execution will be a no-op for
