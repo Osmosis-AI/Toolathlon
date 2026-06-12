@@ -45,7 +45,16 @@ DEFAULT_MODEL_SHORT_NAME = "v3-sandbox-model"
 DEFAULT_PROVIDER = "unified"
 
 GATEWAY_STARTUP_TIMEOUT = int(os.environ.get("TOOLATHLON_V3_GATEWAY_STARTUP_TIMEOUT", "900"))
-TOOL_QUERY_TIMEOUT = 10
+# Per-attempt timeout for GET <gateway>/tools.  The gateway's /tools
+# endpoint internally enumerates all ~50 MCP servers — under heavy
+# concurrent container density the enumeration occasionally takes
+# 10-20s due to MCP child-process startup contention.  10s was too
+# tight under load; 30s is generous enough to ride out transient
+# slowness while still failing in a reasonable window.
+TOOL_QUERY_TIMEOUT = int(os.environ.get("TOOLATHLON_V3_TOOL_QUERY_TIMEOUT", "30"))
+# Number of tool-query attempts (1 means no retry).  Combined worst
+# case: TOOL_QUERY_ATTEMPTS × TOOL_QUERY_TIMEOUT + sum of backoffs.
+TOOL_QUERY_ATTEMPTS = int(os.environ.get("TOOLATHLON_V3_TOOL_QUERY_ATTEMPTS", "3"))
 LONG_STEP_TIMEOUT = 30 * 60
 DEPLOY_TIMEOUT = 30 * 60          # outer cap on deploy_containers.sh
 PROBE_TIMEOUT = 60                 # outer cap on fast shared-infra probe
@@ -473,22 +482,55 @@ async def _run_setup(execution: ExecutionState) -> None:
         else:
             raise RuntimeError(f"Gateway not ready on port {gateway_port} after {GATEWAY_STARTUP_TIMEOUT}s")
 
-        # Step 7: Query tool schemas
+        # Step 7: Query tool schemas (with retry).
+        #
+        # Gateway's ``/tools`` endpoint internally enumerates every
+        # configured MCP server (notion, github, canvas, woocommerce,
+        # k8s, ...).  Under heavy concurrent container startup the
+        # enumeration occasionally takes 10-20s — previously a single
+        # 10s timeout made this the most common late-setup failure
+        # ("Failed to query tools from gateway: " with empty error
+        # from asyncio.TimeoutError).
+        #
+        # Now: ``TOOL_QUERY_ATTEMPTS`` (default 3) attempts at
+        # ``TOOL_QUERY_TIMEOUT`` (default 30s) each, with 2s, 4s
+        # backoff between.  Worst case ~96s — acceptable inside the
+        # 30-min setup timeout budget.  Error messages capture the
+        # exception class as well as ``str(e)`` so timeout failures
+        # (where str() is empty) are still diagnosable.
         execution.setup_phase = "tool_query"
         tools: List[ToolDef] = []
-        try:
-            async with httpx.AsyncClient(timeout=TOOL_QUERY_TIMEOUT) as client:
-                resp = await client.get(f"{gateway_url}/tools")
-                resp.raise_for_status()
-                data = resp.json()
-                for t in data.get("tools", []):
-                    tools.append(ToolDef(
-                        name=t["name"],
-                        description=t.get("description", ""),
-                        parameters=t.get("parameters", {}),
-                    ))
-        except Exception as e:
-            raise RuntimeError(f"Failed to query tools from gateway: {e}")
+        last_exc: Optional[BaseException] = None
+        for attempt in range(1, TOOL_QUERY_ATTEMPTS + 1):
+            try:
+                async with httpx.AsyncClient(timeout=TOOL_QUERY_TIMEOUT) as client:
+                    resp = await client.get(f"{gateway_url}/tools")
+                    resp.raise_for_status()
+                    data = resp.json()
+                    for t in data.get("tools", []):
+                        tools.append(ToolDef(
+                            name=t["name"],
+                            description=t.get("description", ""),
+                            parameters=t.get("parameters", {}),
+                        ))
+                last_exc = None
+                break
+            except Exception as e:
+                last_exc = e
+                log(
+                    f"tool_query attempt {attempt}/{TOOL_QUERY_ATTEMPTS} for "
+                    f"{execution.execution_id} failed: {type(e).__name__}({e!s})"
+                )
+                # Drop any partial tools accumulated before the error
+                tools = []
+                if attempt < TOOL_QUERY_ATTEMPTS:
+                    await asyncio.sleep(2 * attempt)
+        if last_exc is not None:
+            raise RuntimeError(
+                f"Failed to query tools from gateway after "
+                f"{TOOL_QUERY_ATTEMPTS} attempts: "
+                f"{type(last_exc).__name__}({last_exc!s})"
+            )
 
         # Done — flip to ready and start the container watchdog so any
         # out-of-band exit gets reconciled into manager state automatically.
