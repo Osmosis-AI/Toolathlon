@@ -100,8 +100,7 @@ def fetch_sheet_data_from_file(sheets_service, file_id: str) -> List[List[Any]]:
         return values
         
     except Exception as e:
-        print(f" Failed to get data from file {file_id}: {e}")
-        exit(1)
+        raise RuntimeError(f"Failed to get data from file {file_id}: {e}") from e
     
     return []
 
