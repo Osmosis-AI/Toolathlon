@@ -160,10 +160,16 @@ start_operation() {
   echo ""
   log_info "========== Processing cluster ${cluster_name} =========="
 
-  create_cluster "$cluster_name" "$configpath"
-  verify_cluster "${cluster_name}" "$configpath"
+  if ! create_cluster "$cluster_name" "$configpath"; then
+    log_error "Aborting start_operation: kind create cluster failed for ${cluster_name}"
+    return 1
+  fi
+  if ! verify_cluster "${cluster_name}" "$configpath"; then
+    log_error "Aborting start_operation: cluster verification failed for ${cluster_name}"
+    return 1
+  fi
 
-  # Pre-load images from host docker cache into kind cluster's
+  # Pre-load images from the host image cache into kind cluster's
   # containerd so apply_resources doesn't pull from Docker Hub.
   # Anonymous-pull rate limit (~100/6h per IP) is easily exhausted on
   # a busy multi-instance host.  After first run the host cache stays
@@ -179,18 +185,28 @@ start_operation() {
     redis:7.2
   )
   for _img in "${REQUIRED_IMAGES[@]}"; do
-    if ! docker image inspect "$_img" >/dev/null 2>&1; then
-      log_info "Host docker cache missing $_img; pulling once..."
-      docker pull "$_img" || log_warning "docker pull $_img failed (will let kubelet retry)"
+    if ! "$podman_or_docker" image inspect "$_img" >/dev/null 2>&1; then
+      log_info "Host $podman_or_docker cache missing $_img; pulling once..."
+      "$podman_or_docker" pull "$_img" || log_warning "$podman_or_docker pull $_img failed (will let kubelet retry)"
     fi
     log_info "kind load $_img into cluster $cluster_name (offline)..."
-    kind load docker-image "$_img" --name "$cluster_name" || log_warning "kind load $_img failed"
+    KIND_EXPERIMENTAL_PROVIDER="$podman_or_docker" kind load docker-image "$_img" --name "$cluster_name" || log_warning "kind load $_img failed"
   done
 
-  apply_resources "$configpath"
+  if ! apply_resources "$configpath"; then
+    log_error "Aborting start_operation: kubectl apply failed"
+    return 1
+  fi
 
   # Copy the config file to the backup directory
-  cp "$configpath" "$backup_configpath"
+  if ! mkdir -p "$backup_k8sconfig_path_dir"; then
+    log_error "Failed to create backup config directory: $backup_k8sconfig_path_dir"
+    return 1
+  fi
+  if ! cp "$configpath" "$backup_configpath"; then
+    log_error "Failed to copy kubeconfig backup to $backup_configpath"
+    return 1
+  fi
 
   echo ""
   log_info "========== Security audit cluster deployment completed =========="
