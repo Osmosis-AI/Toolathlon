@@ -354,23 +354,23 @@ start_operation() {
   # busy multi-instance host and leaves rollout status hanging forever
   # in ImagePullBackOff.
   #
-  # Semantics: ``docker image inspect`` checks if the host already has
+  # Semantics: ``$podman_or_docker image inspect`` checks if the host already has
   # the tagged image (it almost always does after first run; tagged
-  # images survive Toolathlon's gentle ``docker image prune -f`` which
-  # only removes dangling layers).  If absent, pull once.  Then
-  # ``kind load docker-image`` is a local-only copy from host docker
-  # cache into the kind node's containerd — no network call.
+  # images survive Toolathlon's gentle image prune, which only removes
+  # dangling layers).  If absent, pull once.  Then ``kind load
+  # docker-image`` is a local-only copy from the host image cache into
+  # the kind node's containerd — no network call.
   REQUIRED_IMAGES=(mysql:8.4 nginx:1.14)
   for _img in "${REQUIRED_IMAGES[@]}"; do
-    if ! docker image inspect "$_img" >/dev/null 2>&1; then
-      log_info "Host docker cache missing $_img; pulling once..."
-      if ! docker pull "$_img"; then
+    if ! "$podman_or_docker" image inspect "$_img" >/dev/null 2>&1; then
+      log_info "Host $podman_or_docker cache missing $_img; pulling once..."
+      if ! "$podman_or_docker" pull "$_img"; then
         log_error "Failed to pull $_img from registry"
         return 1
       fi
     fi
     log_info "kind load $_img into cluster $cluster_name (offline)..."
-    if ! kind load docker-image "$_img" --name "$cluster_name"; then
+    if ! KIND_EXPERIMENTAL_PROVIDER="$podman_or_docker" kind load docker-image "$_img" --name "$cluster_name"; then
       log_error "kind load failed for $_img"
       return 1
     fi
@@ -397,21 +397,42 @@ start_operation() {
   fi
 
   # Ensure csv-loader Pod is ready
-  kubectl --kubeconfig="$configpath" -n data wait --for=condition=Ready pod/csv-loader --timeout=120s
+  if ! kubectl --kubeconfig="$configpath" -n data wait --for=condition=Ready pod/csv-loader --timeout=120s; then
+    log_error "csv-loader pod did not become ready within 120s"
+    return 1
+  fi
 
   # Copy CSV files to csv-loader
-  kubectl --kubeconfig="$configpath" -n data cp "$dataset_path_dir/f1/." csv-loader:/csv
+  if ! kubectl --kubeconfig="$configpath" -n data cp "$dataset_path_dir/f1/." csv-loader:/csv; then
+    log_error "Failed to copy F1 CSV files into csv-loader pod"
+    return 1
+  fi
 
-  kubectl -n data exec -i mysql-f1-0 -- mysql -h mysql-f1 -uroot -p"$MYSQL_ROOT_PASSWORD" f1 < "$schema_path"
+  if ! kubectl --kubeconfig="$configpath" -n data exec -i mysql-f1-0 -- mysql -h mysql-f1 -uroot -p"$MYSQL_ROOT_PASSWORD" f1 < "$schema_path"; then
+    log_error "Failed to load F1 schema into mysql-f1"
+    return 1
+  fi
 
-  load_f1_csv
+  if ! load_f1_csv; then
+    log_error "Failed to load F1 CSV data"
+    return 1
+  fi
 
-  create_mysql_readonly_user
+  if ! create_mysql_readonly_user; then
+    log_error "Failed to create MySQL read-only user"
+    return 1
+  fi
 
   # Copy the config file to the backup directory
-  mkdir -p "$backup_k8sconfig_path_dir"
+  if ! mkdir -p "$backup_k8sconfig_path_dir"; then
+    log_error "Failed to create backup config directory: $backup_k8sconfig_path_dir"
+    return 1
+  fi
   backup_configpath="$backup_k8sconfig_path_dir/${cluster_name}-config.yaml"
-  cp "$configpath" "$backup_configpath"
+  if ! cp "$configpath" "$backup_configpath"; then
+    log_error "Failed to copy kubeconfig backup to $backup_configpath"
+    return 1
+  fi
 
   log_info "MySQL-f1 initialization completed."
 
