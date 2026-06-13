@@ -1,5 +1,6 @@
 from argparse import ArgumentParser
 import os
+from pathlib import Path
 import json
 import subprocess
 import re
@@ -13,6 +14,26 @@ from utils.evaluation.retry import DEFAULT_MAX_ATTEMPTS, DEFAULT_POLL_S, grade_w
 
 
 VERBOSE = False
+
+
+def get_instance_suffix() -> str:
+    try:
+        import yaml
+    except ImportError:
+        return ""
+    for root in [Path.cwd(), *Path(__file__).resolve().parents]:
+        config_path = root / "configs" / "ports_config.yaml"
+        if config_path.exists():
+            try:
+                with open(config_path, "r") as f:
+                    return (yaml.safe_load(f) or {}).get("instance_suffix", "")
+            except Exception:
+                return ""
+    return ""
+
+
+def kubeconfig_filename(cluster_name: str) -> str:
+    return f"{cluster_name}{get_instance_suffix()}-config.yaml"
 
 
 def debug(msg: str) -> None:
@@ -37,8 +58,9 @@ def run_cmd(cmd: List[str], suppress_error_log: bool = False) -> Tuple[int, str,
 
 
 def detect_kubeconfig(agent_workspace: str, task_dir: str) -> str:
-    cand1 = os.path.join(task_dir, "k8s_configs", "cluster-cleanup-config.yaml")
-    cand2 = os.path.join(agent_workspace, "k8s_configs", "cluster-cleanup-config.yaml")
+    filename = kubeconfig_filename("cluster-cleanup")
+    cand1 = os.path.join(task_dir, "k8s_configs", filename)
+    cand2 = os.path.join(agent_workspace, "k8s_configs", filename)
     debug(f"Trying kubeconfig candidates: {cand1} | {cand2}")
     if os.path.exists(cand1):
         debug(f"Using kubeconfig: {cand1}")

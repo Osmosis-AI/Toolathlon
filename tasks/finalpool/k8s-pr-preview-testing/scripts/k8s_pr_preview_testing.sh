@@ -11,6 +11,16 @@ mkdir -p $backup_k8sconfig_path_dir
 cluster_name="cluster-pr-preview"
 
 podman_or_docker=$(uv run python -c "import sys; sys.path.append('configs'); from global_configs import global_configs; print(global_configs.podman_or_docker)")
+instance_suffix=$(uv run python -c "
+import yaml
+try:
+    with open('configs/ports_config.yaml', 'r') as f:
+        config = yaml.safe_load(f) or {}
+        print(config.get('instance_suffix', ''))
+except Exception:
+    print('')
+" 2>/dev/null || echo "")
+cluster_name="${cluster_name}${instance_suffix}"
 
 # Color output definitions
 RED='\033[0;31m'
@@ -59,66 +69,24 @@ cleanup_existing_cluster() {
   fi
 }
 
-# Remove orphan host containers that a prior agent may have spawned via
-# the shared /var/run/docker.sock — typically a socat forwarder
-# satisfying the task's "long-term basis" requirement of exposing the
-# kind NodePort on host:${PORT}.  These containers live on the host
-# (not in the agent's task container), so v3's per-task cleanup
-# doesn't see them.  If left behind, they hold ${PORT} and block the
-# next ``kind create cluster`` with "port already allocated".
-#
-# Three complementary passes so we catch all common agent shapes:
-#   1. Known name pattern — agents typically name forwarders after the
-#      app under test ("simple-shopping-*").
-#   2. Port-holding via -p mapping — any container with a declared
-#      port mapping for host port ${PORT}.
-#   3. Host-network containers whose command references ${PORT} — the
-#      publish filter misses these because they bind the host's port
-#      directly without docker port mapping.
-# Final ``ss`` check surfaces any non-docker holder we couldn't reach.
+# Remove the exact kind node container created by this script if a prior
+# run left it orphaned after the kind cluster record disappeared.
+# For a single-node kind cluster, the runtime container name is
+# ``${cluster_name}-control-plane``.
 cleanup_agent_host_artifacts() {
-  log_info "Cleaning up agent-spawned host artifacts (orphans from prior runs)..."
+  log_info "Cleaning up orphaned kind control-plane container if it exists..."
+  local kind_container="${cluster_name}-control-plane"
 
-  # Pass 1: known name pattern
-  local named
-  named=$(docker ps -aq --filter "name=simple-shopping-" 2>/dev/null)
-  if [ -n "$named" ]; then
-    log_info "  Removing simple-shopping-* containers:"
-    docker rm -f $named 2>&1 | sed 's/^/    /' || true
-  fi
-
-  # Pass 2: containers with declared -p port mapping for ${PORT}
-  local port_holders
-  port_holders=$(docker ps -q --filter "publish=${PORT}" 2>/dev/null)
-  if [ -n "$port_holders" ]; then
-    log_info "  Removing containers with -p mapping on ${PORT}:"
-    docker rm -f $port_holders 2>&1 | sed 's/^/    /' || true
-  fi
-
-  # Pass 3: --network=host containers whose command references ${PORT}.
-  local host_net_listeners=""
-  local cid netmode cmd
-  for cid in $(docker ps -q 2>/dev/null); do
-    netmode=$(docker inspect "$cid" --format '{{.HostConfig.NetworkMode}}' 2>/dev/null)
-    if [ "$netmode" = "host" ]; then
-      cmd=$(docker inspect "$cid" --format '{{json .Config.Cmd}} {{json .Args}}' 2>/dev/null)
-      if echo "$cmd" | grep -qw "${PORT}"; then
-        host_net_listeners="$host_net_listeners $cid"
-      fi
-    fi
-  done
-  if [ -n "$host_net_listeners" ]; then
-    log_info "  Removing --network=host containers referencing port ${PORT}:"
-    docker rm -f $host_net_listeners 2>&1 | sed 's/^/    /' || true
+  if "$podman_or_docker" ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$kind_container"; then
+    log_info "  Removing kind container: $kind_container"
+    "$podman_or_docker" rm -f "$kind_container" 2>&1 | sed 's/^/    /' || true
+  else
+    log_info "  No orphan kind container found: $kind_container"
   fi
 
   if ss -tlnp 2>/dev/null | grep -q ":${PORT} "; then
-    log_warning "  Host port ${PORT} still bound after cleanup (non-docker process?):"
+    log_warning "  Host port ${PORT} still bound after cleanup (non-container process?):"
     ss -tlnp 2>/dev/null | grep ":${PORT} " | sed 's/^/    /' || true
-  fi
-
-  if [ -z "$named" ] && [ -z "$port_holders" ] && [ -z "$host_net_listeners" ]; then
-    log_info "  No orphan containers found on host port ${PORT}"
   fi
 }
 
@@ -249,15 +217,15 @@ start_operation() {
   # tag, kubelet will simply fall back to a live pull.
   REQUIRED_IMAGES=(nginx:1.25-alpine)
   for _img in "${REQUIRED_IMAGES[@]}"; do
-    if ! docker image inspect "$_img" >/dev/null 2>&1; then
-      log_info "Host docker cache missing $_img — attempting docker pull..."
-      if ! docker pull "$_img" 2>&1 | tail -3; then
-        log_warning "docker pull $_img returned non-zero (rate limit/offline?)"
+    if ! "$podman_or_docker" image inspect "$_img" >/dev/null 2>&1; then
+      log_info "Host $podman_or_docker cache missing $_img — attempting $podman_or_docker pull..."
+      if ! "$podman_or_docker" pull "$_img" 2>&1 | tail -3; then
+        log_warning "$podman_or_docker pull $_img returned non-zero (rate limit/offline?)"
       fi
     fi
-    if docker image inspect "$_img" >/dev/null 2>&1; then
+    if "$podman_or_docker" image inspect "$_img" >/dev/null 2>&1; then
       log_info "kind load $_img into cluster $cluster_name (offline)..."
-      kind load docker-image "$_img" --name "$cluster_name" || log_warning "kind load $_img failed"
+      KIND_EXPERIMENTAL_PROVIDER="$podman_or_docker" kind load docker-image "$_img" --name "$cluster_name" || log_warning "kind load $_img failed"
     else
       log_warning "$_img unavailable on host after pull attempt — agent's kubectl apply will need to pull from upstream"
     fi

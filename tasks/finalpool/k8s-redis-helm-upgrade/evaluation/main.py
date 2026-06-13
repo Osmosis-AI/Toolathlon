@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 import json
 import subprocess
 import yaml
@@ -6,6 +7,26 @@ import re
 from typing import Dict, Any
 
 TARGET_VERSION = "22.0.0"
+
+
+def get_instance_suffix() -> str:
+    try:
+        import yaml
+    except ImportError:
+        return ""
+    for root in [Path.cwd(), *Path(__file__).resolve().parents]:
+        config_path = root / "configs" / "ports_config.yaml"
+        if config_path.exists():
+            try:
+                with open(config_path, "r") as f:
+                    return (yaml.safe_load(f) or {}).get("instance_suffix", "")
+            except Exception:
+                return ""
+    return ""
+
+
+def kubeconfig_filename(cluster_name: str) -> str:
+    return f"{cluster_name}{get_instance_suffix()}-config.yaml"
 
 def check_helm_upgrade(task_dir: str) -> Dict[str, Any]:
     """
@@ -37,7 +58,7 @@ def check_helm_upgrade(task_dir: str) -> Dict[str, Any]:
     
     try:
         # Check if kubeconfig exists
-        kubeconfig_path = os.path.join(task_dir, "k8s_configs", "cluster-redis-helm-config.yaml")
+        kubeconfig_path = os.path.join(task_dir, "k8s_configs", kubeconfig_filename("cluster-redis-helm"))
         if not os.path.exists(kubeconfig_path):
             return {"error": "Kubeconfig not found"}
         
