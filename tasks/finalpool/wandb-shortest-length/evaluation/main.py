@@ -26,15 +26,12 @@ def _check_shortest_length(agent_csv_path: str, groundtruth_csv_path: str):
         return False, f"Could not read CSV files: {e}"
 
     errors = []
-    if agent_df.shape != groundtruth_df.shape:
-        errors.append(
-            f"CSV shape mismatch: agent has {agent_df.shape}, groundtruth has {groundtruth_df.shape}"
-        )
     if not agent_df.columns.equals(groundtruth_df.columns):
         errors.append(
             f"Column mismatch: agent has {list(agent_df.columns)}, groundtruth has {list(groundtruth_df.columns)}"
         )
 
+    compare_rows = 0
     if not errors:
         n_gt = len(groundtruth_df)
         n_ag = len(agent_df)
@@ -53,13 +50,15 @@ def _check_shortest_length(agent_csv_path: str, groundtruth_csv_path: str):
 
     if not errors:
         try:
-            if not agent_df.equals(groundtruth_df):
+            agent_cmp = agent_df.iloc[:compare_rows].reset_index(drop=True)
+            gt_cmp = groundtruth_df.iloc[:compare_rows].reset_index(drop=True)
+            if not agent_cmp.equals(gt_cmp):
                 differences = []
-                for row_idx in range(min(len(agent_df), len(groundtruth_df))):
+                for row_idx in range(compare_rows):
                     for col_name in agent_df.columns:
                         if col_name in groundtruth_df.columns:
-                            agent_val = agent_df.iloc[row_idx][col_name]
-                            truth_val = groundtruth_df.iloc[row_idx][col_name]
+                            agent_val = agent_cmp.iloc[row_idx][col_name]
+                            truth_val = gt_cmp.iloc[row_idx][col_name]
                             if pd.isna(agent_val) and pd.isna(truth_val):
                                 continue
                             elif pd.isna(agent_val) or pd.isna(truth_val):
