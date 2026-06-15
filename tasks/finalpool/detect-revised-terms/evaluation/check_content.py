@@ -1,5 +1,6 @@
 import os
 import re
+from collections import Counter
 from utils.general.helper import read_json
 import pandas as pd
 
@@ -70,20 +71,10 @@ def check_content(agent_workspace: str, groundtruth_workspace: str):
     if not all(col in agent_df.columns for col in required_columns):
         return False, f"Agent's revised terms file is missing required columns: {required_columns}"
 
-    # Recall-only check: the grader requires that every row in the
-    # groundtruth is present somewhere in the agent's output, but does
-    # NOT penalize the agent for producing extra rows.
-    #
-    # Rationale: the task prompt asks for "ANY clauses cited that
-    # conflict with, are inconsistent with, have been revised by, or
-    # repealed under the new law", which legitimately admits multiple
-    # revised provisions per case.  A faithful agent will often surface
-    # more rows than the curated GT subset (for example, additional
-    # revised cites the GT leaves out because of mapping ambiguity, like
-    # 民法总则→民法典 same-text moves).  Requiring exact set equality
-    # would penalize broader-but-correct answers; requiring strict
-    # supersetness still ensures every concretely-revised provision we
-    # care about is captured.
+    # Exact match after normalization. We accept either the full
+    # groundtruth or the groundtruth with its final row removed because
+    # the final row is intentionally treated as optional/ambiguous.
+    check_columns = required_columns
 
     def make_key(row):
         vals = []
@@ -96,17 +87,38 @@ def check_content(agent_workspace: str, groundtruth_workspace: str):
             vals.append(v)
         return tuple(vals)
 
-    groundtruth_entries = {make_key(r) for _, r in groundtruth_df.iterrows()}
-    agent_entries = {make_key(r) for _, r in agent_df.iterrows()}
+    def format_sample(entry):
+        return tuple((v[:80] + "…") if len(v) > 80 else v for v in entry)
 
-    missing_in_agent = groundtruth_entries - agent_entries
-    if missing_in_agent:
-        sample = next(iter(missing_in_agent))
-        sample_short = tuple((v[:80] + "…") if len(v) > 80 else v for v in sample)
-        return False, (
-            f"Recall failed: {len(missing_in_agent)} of {len(groundtruth_entries)} "
-            f"required entries are missing from the agent output. "
-            f"Example missing entry: {sample_short}"
-        )
+    def compare_against(candidate_df, label):
+        if len(agent_df) != len(candidate_df):
+            return False, f"{label}: row count mismatch, agent has {len(agent_df)} rows, groundtruth has {len(candidate_df)} rows"
 
-    return True, None
+        gt_entries = Counter(make_key(r) for _, r in candidate_df.iterrows())
+        agent_entries = Counter(make_key(r) for _, r in agent_df.iterrows())
+        if agent_entries == gt_entries:
+            return True, None
+
+        missing = gt_entries - agent_entries
+        extra = agent_entries - gt_entries
+        parts = [f"{label}: normalized content mismatch."]
+        if missing:
+            sample = next(iter(missing))
+            parts.append(f"Missing example: {format_sample(sample)}")
+        if extra:
+            sample = next(iter(extra))
+            parts.append(f"Extra example: {format_sample(sample)}")
+        return False, " ".join(parts)
+
+    candidates = [("full groundtruth", groundtruth_df)]
+    if len(groundtruth_df) > 0:
+        candidates.append(("groundtruth without final row", groundtruth_df.iloc[:-1]))
+
+    errors = []
+    for label, candidate_df in candidates:
+        ok, msg = compare_against(candidate_df, label)
+        if ok:
+            return True, None
+        errors.append(msg)
+
+    return False, "Agent output did not exactly match any accepted groundtruth version. " + " | ".join(errors)
