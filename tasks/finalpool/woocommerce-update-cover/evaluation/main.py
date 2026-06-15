@@ -207,7 +207,7 @@ async def main(args):
                 failed_products.append(failed_info)
 
         error_msg = f"❌ Evaluation failed: Not all featured images were updated correctly\n"
-        error_msg += f"Success rate: {(success_count/total_products*100):.1f}% (Required: ≥80%)\n"
+        error_msg += f"Success rate: {(success_count/total_products*100):.1f}% (Required: = 100%)\n"
         error_msg += f"Successes: {success_count}/{total_products}\n"
         if failed_products:
             error_msg += f"Failed products:\n" + "\n".join([f"  - {info}" for info in failed_products])
