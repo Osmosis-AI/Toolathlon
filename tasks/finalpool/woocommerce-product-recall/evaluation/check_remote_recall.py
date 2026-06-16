@@ -7,6 +7,7 @@ Check WooCommerce product removal, Google Forms creation, and email sending
 import os
 import sys
 import json
+import re
 import requests
 import imaplib
 import email
@@ -14,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Tuple, Optional
 from email.header import decode_header
 from requests.auth import HTTPBasicAuth
+from utils.general.helper import normalize_str
 
 # Add project path
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -273,6 +275,197 @@ def check_google_forms_creation(agent_workspace: str) -> Tuple[bool, str]:
     except Exception as e:
         return False, f"Google Forms remote check error: {str(e)}"
 
+def _load_recall_form_identifiers(agent_workspace: str) -> Tuple[str, str]:
+    forms_files = [
+        os.path.join(agent_workspace, 'recall_report.json'),
+        os.path.join(agent_workspace, 'google_forms.json'),
+        os.path.join(agent_workspace, 'forms_created.json')
+    ]
+
+    forms_data = None
+    for forms_file in forms_files:
+        if os.path.exists(forms_file):
+            try:
+                with open(forms_file, 'r', encoding='utf-8') as f:
+                    forms_data = json.load(f)
+                break
+            except Exception:
+                continue
+
+    if not forms_data:
+        return "", ""
+
+    form_url = forms_data.get('form_url', '') or forms_data.get('url', '') or forms_data.get('link', '')
+    form_id = forms_data.get('form_id', '') or forms_data.get('id', '')
+
+    if form_url and not form_id:
+        match = re.search(r'/forms/d/(?:e/)?([a-zA-Z0-9-_]+)', form_url)
+        if match:
+            form_id = match.group(1)
+
+    return form_url, form_id
+
+def _normalized(value) -> str:
+    return normalize_str(str(value or ""))
+
+def _decode_email_part(part) -> str:
+    payload = part.get_payload(decode=True)
+    if payload is None:
+        raw_payload = part.get_payload()
+        return raw_payload if isinstance(raw_payload, str) else ""
+
+    charset = part.get_content_charset() or "utf-8"
+    try:
+        return payload.decode(charset, errors="replace")
+    except LookupError:
+        return payload.decode("utf-8", errors="replace")
+
+def _extract_email_body(msg) -> str:
+    body_parts = []
+    if msg.is_multipart():
+        for part in msg.walk():
+            content_type = part.get_content_type()
+            disposition = part.get("Content-Disposition", "").lower()
+            if content_type not in ("text/plain", "text/html"):
+                continue
+            if "attachment" in disposition:
+                continue
+            body_parts.append(_decode_email_part(part))
+    else:
+        body_parts.append(_decode_email_part(msg))
+    return "\n".join(body_parts)
+
+def _email_body_contains_form_link(body: str, form_url: str, form_id: str) -> bool:
+    body_norm = _normalized(body)
+    markers = []
+    if form_url:
+        markers.append(form_url)
+    if form_id:
+        markers.extend([
+            f"docs.google.com/forms/d/{form_id}",
+            f"docs.google.com/forms/d/e/{form_id}",
+        ])
+
+    return any(_normalized(marker) in body_norm for marker in markers if marker)
+
+def _google_form_question_type(question: Dict) -> str:
+    if "choiceQuestion" in question:
+        choice_type = question.get("choiceQuestion", {}).get("type", "").lower()
+        return "checkbox" if choice_type == "checkbox" else "choice"
+    if "dateQuestion" in question:
+        return "date"
+    if "textQuestion" in question:
+        if question.get("textQuestion", {}).get("paragraph"):
+            return "paragraph"
+        return "text"
+    return "unknown"
+
+def _google_form_question_choices(question: Dict) -> List[str]:
+    choice_question = question.get("choiceQuestion", {})
+    return [
+        option.get("value", "")
+        for option in choice_question.get("options", [])
+    ]
+
+def _google_form_type_matches(expected_type: str, actual_type: str) -> bool:
+    expected_type = expected_type.lower()
+    actual_type = actual_type.lower()
+    return expected_type == actual_type
+
+def _extract_google_form_fields(form: Dict) -> List[Dict]:
+    fields = []
+    for item in form.get("items", []):
+        question = item.get("questionItem", {}).get("question", {})
+        fields.append({
+            "name": item.get("title", ""),
+            "description": item.get("description", ""),
+            "required": bool(question.get("required", False)),
+            "type": _google_form_question_type(question),
+            "choices": _google_form_question_choices(question),
+        })
+    return fields
+
+def _validate_google_form_against_template(form: Dict) -> Tuple[bool, str]:
+    template_path = os.path.join(
+        task_dir, "initial_workspace", "recall_form_template.json"
+    )
+    try:
+        with open(template_path, "r", encoding="utf-8") as f:
+            template = json.load(f)
+    except Exception as e:
+        return False, f"Cannot load recall form template: {e}"
+
+    info = form.get("info", {})
+    actual_title = info.get("title") or info.get("documentTitle") or ""
+    expected_title = template.get("form_title", "")
+    if _normalized(actual_title) != _normalized(expected_title):
+        return False, (
+            "Form title mismatch: "
+            f"expected '{expected_title}', got '{actual_title}'"
+        )
+
+    actual_description = info.get("description", "")
+    expected_description = template.get("form_description", "")
+    if _normalized(actual_description) != _normalized(expected_description):
+        return False, (
+            "Form description mismatch: "
+            f"expected '{expected_description}', got '{actual_description}'"
+        )
+
+    expected_fields = template.get("fields", [])
+    actual_fields = _extract_google_form_fields(form)
+    if len(actual_fields) != len(expected_fields):
+        return False, (
+            "Form field count mismatch: "
+            f"expected {len(expected_fields)}, got {len(actual_fields)}"
+        )
+
+    for idx, (expected, actual) in enumerate(zip(expected_fields, actual_fields), 1):
+        expected_name = expected.get("name", "")
+        actual_name = actual.get("name", "")
+        if _normalized(actual_name) != _normalized(expected_name):
+            return False, (
+                f"Field {idx} name mismatch: "
+                f"expected '{expected_name}', got '{actual_name}'"
+            )
+
+        expected_type = expected.get("type", "")
+        actual_type = actual.get("type", "")
+        if not _google_form_type_matches(expected_type, actual_type):
+            return False, (
+                f"Field {idx} type mismatch for '{expected_name}': "
+                f"expected '{expected_type}', got '{actual_type}'"
+            )
+
+        expected_required = bool(expected.get("required", False))
+        actual_required = bool(actual.get("required", False))
+        if actual_required != expected_required:
+            return False, (
+                f"Field {idx} required flag mismatch for '{expected_name}': "
+                f"expected {expected_required}, got {actual_required}"
+            )
+
+        expected_description = expected.get("description", "")
+        actual_description = actual.get("description", "")
+        if _normalized(actual_description) != _normalized(expected_description):
+            return False, (
+                f"Field {idx} description mismatch for '{expected_name}': "
+                f"expected '{expected_description}', got '{actual_description}'"
+            )
+
+        expected_choices = expected.get("choices")
+        if expected_choices is not None:
+            actual_choices = actual.get("choices", [])
+            if [_normalized(x) for x in actual_choices] != [
+                _normalized(x) for x in expected_choices
+            ]:
+                return False, (
+                    f"Field {idx} choices mismatch for '{expected_name}': "
+                    f"expected {expected_choices}, got {actual_choices}"
+                )
+
+    return True, f"Form content matches template ({len(expected_fields)} fields)"
+
 def verify_google_form_remotely(form_id: str, form_url: str) -> Tuple[bool, str]:
     """Verify the Google Form exists, using the authenticated Forms API.
 
@@ -357,10 +550,14 @@ def verify_google_form_remotely(form_id: str, form_url: str) -> Tuple[bool, str]
     if form.get('formId') != form_id:
         return False, f"Forms API returned wrong formId (got {form.get('formId')})"
 
+    template_ok, template_msg = _validate_google_form_against_template(form)
+    if not template_ok:
+        return False, template_msg
+
     info = form.get('info', {})
     item_count = len(form.get('items', []))
     title = info.get('title') or info.get('documentTitle') or '(untitled)'
-    return True, f"Form verified: '{title}' (id={form_id}, items={item_count})"
+    return True, f"Form verified: '{title}' (id={form_id}, items={item_count}); {template_msg}"
 
 def check_recall_email_sending(agent_workspace: str, wc_client: WooCommerceClient) -> Tuple[bool, str]:
     """Check recall email sending"""
@@ -370,6 +567,10 @@ def check_recall_email_sending(agent_workspace: str, wc_client: WooCommerceClien
         
         if not affected_customers:
             return False, "No affected customers found"
+
+        form_url, form_id = _load_recall_form_identifiers(agent_workspace)
+        if not form_url and not form_id:
+            return False, "No Google Forms URL or ID found for recall email body verification"
         
         # Load the email configuration
         config_path = all_token_key_session.emails_config_file
@@ -431,8 +632,11 @@ def check_recall_email_sending(agent_workspace: str, wc_client: WooCommerceClien
             # Check if it's a recall email
             recall_keywords = ['recall', 'safety', 'urgent notice', 'product alert', 'withdrawal']
             is_recall_email = any(keyword in subject.lower() for keyword in recall_keywords)
+
+            body = _extract_email_body(msg)
+            has_form_link = _email_body_contains_form_link(body, form_url, form_id)
             
-            if is_recall_email:
+            if is_recall_email and has_form_link:
                 recall_emails_found += 1
                 
                 # Match the affected customers
@@ -451,9 +655,9 @@ def check_recall_email_sending(agent_workspace: str, wc_client: WooCommerceClien
             return False, "No affected customers found"
         
         if notified_customers == total_customers:
-            return True, f"Successfully sent recall emails to all {total_customers} affected customers"
+            return True, f"Successfully sent recall emails with the Google Forms link to all {total_customers} affected customers"
         else:
-            return False, f"Only sent recall emails to {notified_customers}/{total_customers} affected customers, should notify all"
+            return False, f"Only sent recall emails with the Google Forms link to {notified_customers}/{total_customers} affected customers, should notify all"
         
     except Exception as e:
         return False, f"Recall email check error: {str(e)}"

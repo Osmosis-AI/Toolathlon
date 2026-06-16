@@ -10,7 +10,7 @@
     },
     {
       "name": "Contact Email", 
-      "type": "email",
+      "type": "text",
       "required": true,
       "description": "Email address for further contact"
     },
