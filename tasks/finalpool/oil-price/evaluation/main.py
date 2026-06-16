@@ -185,12 +185,26 @@ def _extract_notion_rows(pages: List[Dict]) -> List[Dict]:
             except Exception:
                 return None
             return None
+        def get_sel(name: str) -> str:
+            try:
+                v = props.get(name, {})
+                if v.get("type") == "select":
+                    s = v.get("select") or {}
+                    return (s.get("name") or "").strip()
+            except Exception:
+                return ""
+            return ""
         row = {
             "m": title_val,
             "wti_close": get_num("WTI Close"),
             "brent_close": get_num("Brent Close"),
             "wti_mom_pct": get_num("WTI MoM %"),
             "brent_mom_pct": get_num("Brent MoM %"),
+            "spread": get_num("Brent-WTI Spread"),
+            "spread_mom_pct": get_num("Spread MoM %"),
+            "z_score": get_num("Spread Z-Score (6m)"),
+            "regime": get_sel("Regime"),
+            "signal": get_sel("Signal"),
         }
         # Allow first month MoM to be None, as long as the closing price exists
         if row["m"] and (row["wti_close"] is not None) and (row["brent_close"] is not None):
@@ -579,6 +593,7 @@ PRICE_ABS_TOL = 0.05            # USD absolute floor
 PRICE_REL_TOL = 0.001           # 0.1% relative
 MOM_PCT_TOL = 0.10              # percentage points
 SPREAD_ABS_TOL = 0.05           # USD
+Z_SCORE_TOL = 0.01              # z-score points
 
 
 def _close_within_tol(expected: float | None, actual: float | None) -> bool:
@@ -629,6 +644,19 @@ def _compare_summary(expected: List[Dict], actual: List[Dict]) -> List[str]:
         else:
             if not _within(e["brent_mom_pct"], a.get("brent_mom_pct"), MOM_PCT_TOL):
                 errs.append(f"Brent MoM% inconsistent: {m} (expected {e['brent_mom_pct']} actual {a.get('brent_mom_pct')})")
+        if not _within(e.get("spread"), a.get("spread"), SPREAD_ABS_TOL):
+            errs.append(f"Brent-WTI Spread inconsistent: {m} (expected {e.get('spread')} actual {a.get('spread')})")
+        if e.get("spread_mom_pct") is None:
+            pass
+        else:
+            if not _within(e["spread_mom_pct"], a.get("spread_mom_pct"), MOM_PCT_TOL):
+                errs.append(f"Spread MoM% inconsistent: {m} (expected {e['spread_mom_pct']} actual {a.get('spread_mom_pct')})")
+        if not _within(e.get("z_score"), a.get("z_score"), Z_SCORE_TOL):
+            errs.append(f"Spread Z-Score inconsistent: {m} (expected {e.get('z_score')} actual {a.get('z_score')})")
+        if (e.get("regime") or "") != (a.get("regime") or ""):
+            errs.append(f"Regime inconsistent: {m} (expected {e.get('regime')} actual {a.get('regime')})")
+        if (e.get("signal") or "") != (a.get("signal") or ""):
+            errs.append(f"Signal inconsistent: {m} (expected {e.get('signal')} actual {a.get('signal')})")
     return errs
 
 
@@ -651,8 +679,9 @@ def _compute_backtest(expected_rows: List[Dict]) -> Tuple[List[Dict], Dict[str, 
     ``prev_row``'s signal — which produced trades labeled (N → N+2) while
     actually computing only the (N+1 → N+2) return.  That was internally
     inconsistent (the entry spread and PnL referred to different periods)
-    and disagreed with both the spec and ``golden/main.py``.  This rewrite
-    matches the golden reference implementation exactly.
+    and disagreed with the clarified spec.  This rewrite aligns trade
+    timing with the spec; metrics use a calendar-month portfolio return
+    series with zero returns in months where no position is closed.
     """
     print(f"🔍 Debug info: Starting backtest calculation, total {len(expected_rows)} months")
 
@@ -1090,6 +1119,7 @@ async def async_main(args):
     # it passes (or the sleep budget is exhausted).
     if yahoo_rows_expected:
         def _summary_check():
+            nonlocal notion_rows
             try:
                 _notion_token = str(tokens_dict.get("notion_integration_key", ""))
                 if not (summary_db_id and _notion_token):
@@ -1114,7 +1144,7 @@ async def async_main(args):
             cmp_errs = _compare_summary(yahoo_rows_expected, _rows)
             if cmp_errs:
                 return False, "; ".join(cmp_errs)
-            # On success, also refresh the outer notion_rows for downstream logs
+            notion_rows = _rows
             return True, None
 
         ok_sum, err_sum = grade_with_retry(_summary_check, max_attempts=4)
