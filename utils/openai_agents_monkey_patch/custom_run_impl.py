@@ -1,7 +1,45 @@
 # monkeypatch
 from __future__ import annotations
+import os
 from agents._run_impl import *
 from agents.util import _coro, _error_tracing
+import shortuuid
+
+
+MAX_SINGLE_TURN_RETURN_CHARS = int(os.getenv("BENCH_MAX_SINGLE_TURN_RETURN_CHARS", 100000))
+
+
+def _truncate_overlong_tool_output(
+    tool_output: Any, context_wrapper: RunContextWrapper[Any]
+) -> Any:
+    tool_output_text = tool_output if isinstance(tool_output, str) else str(tool_output)
+    if len(tool_output_text) <= MAX_SINGLE_TURN_RETURN_CHARS:
+        return tool_output
+
+    original_length = len(tool_output_text)
+    logger.warning("Tool output is too long, return truncated one.")
+    tool_short_uuid = shortuuid.uuid()
+
+    agent_workspace = context_wrapper.context.get("_agent_workspace", ".")
+    agent_workspace = os.path.abspath(agent_workspace)
+    overlong_toolcall_save_dir = os.path.join(
+        agent_workspace, ".overlong_tool_outputs"
+    )
+    os.makedirs(overlong_toolcall_save_dir, exist_ok=True)
+    output_path = os.path.join(overlong_toolcall_save_dir, f"{tool_short_uuid}.json")
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(tool_output_text)
+    logger.warning(f"Tool output saved to {output_path}")
+
+    return (
+        tool_output_text[:MAX_SINGLE_TURN_RETURN_CHARS]
+        + f" ...\n\n(The output of the tool call (shortuuid identifier: {tool_short_uuid}) is too long! "
+        f"Only the first {MAX_SINGLE_TURN_RETURN_CHARS} characters are shown here. "
+        f"The original output length is {original_length} characters. "
+        f"The full output has been saved to the file {output_path}. "
+        "Please check this file carefully, as it may be very long!)"
+    )
 
 @classmethod
 async def my_execute_function_tool_calls(
@@ -31,6 +69,7 @@ async def my_execute_function_tool_calls(
                     ),
                     func_tool.on_invoke_tool(context_wrapper, tool_call.arguments),
                 )
+                result = _truncate_overlong_tool_output(result, context_wrapper)
                 await asyncio.gather(
                     hooks.on_tool_end(context_wrapper, agent, func_tool, result),
                     (
