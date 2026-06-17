@@ -2,6 +2,7 @@ from argparse import ArgumentParser
 import asyncio
 import csv
 import io
+import math
 import os
 import time
 import urllib.error
@@ -73,66 +74,14 @@ UNIVERSITY_ABBREVIATIONS = {
 VENUE2AREA = {
     "aaai": "ai", "ijcai": "ai",
     "cvpr": "vision", "eccv": "vision", "iccv": "vision",
-    "icml": "mlmining", "kdd": "mlmining", "nips": "mlmining", "iclr": "mlmining",
+    # KDD is CSRankings next-tier and is not selected by ?mlmining by default.
+    "icml": "mlmining", "nips": "mlmining", "iclr": "mlmining",
     "acl": "nlp", "emnlp": "nlp", "naacl": "nlp",
 }
 CSR_AREAS = ("ai", "vision", "mlmining", "nlp")
 CSR_TARGET_YEAR = 2024
 CSR_AUTHORS_URL = "https://csrankings.org/generated-author-info.csv"
-
-# Departments CSRankings tags as US institutions that could plausibly land
-# in top-30 AI.  Sourced from the CSRankings region filter (us=1).  Adding
-# a new US institution to this set is a one-time edit.
-US_INSTITUTIONS = {
-    "Carnegie Mellon University",
-    "Univ. of Illinois at Urbana-Champaign",
-    "Univ. of Maryland - College Park",
-    "Univ. of California - San Diego",
-    "Georgia Institute of Technology",
-    "Stanford University",
-    "Johns Hopkins University",
-    "Massachusetts Inst. of Technology",
-    "Univ. of California - Berkeley",
-    "University of Texas at Austin",
-    "University of Wisconsin - Madison",
-    "University of Pennsylvania",
-    "Cornell University",
-    "Purdue University",
-    "University of North Carolina",
-    "Columbia University",
-    "University of Michigan",
-    "New York University",
-    "University of Central Florida",
-    "University of Southern California",
-    "University of Washington",
-    "Pennsylvania State University",
-    "Univ. of California - Los Angeles",
-    "University of Virginia",
-    "Arizona State University",
-    "Princeton University",
-    "Texas A&M University",
-    "Univ. of California - Irvine",
-    "Univ. of California - Santa Barbara",
-    "Boston University",
-    "Univ. of California - Davis",
-    "Univ. of California - Santa Cruz",
-    "Univ. of California - Riverside",
-    "Yale University",
-    "Harvard University",
-    "California Institute of Technology",
-    "Univ. of California - Merced",
-    "University of Chicago",
-    "University of Minnesota",
-    "University of Pittsburgh",
-    "Brown University",
-    "Rice University",
-    "Northwestern University",
-    "Duke University",
-    "Univ. of Massachusetts Amherst",
-    "Univ. of California - San Francisco",
-    "Rutgers University",
-    "Ohio State University",
-}
+CSR_INSTITUTIONS_URL = "https://csrankings.org/institutions.csv"
 
 # Driving distances (miles) from the Los Angeles Natural History Museum,
 # plus the canonical city name CSRankings uses, for every US institution
@@ -144,7 +93,7 @@ US_INSTITUTIONS = {
 DISTANCES_MILES = {
     "University of Southern California": ("Los Angeles", 1),
     "Univ. of California - Los Angeles": ("Los Angeles", 14),
-    "California Institute of Technology": ("Pasadena", 18),
+    "California Inst. of Technology": ("Pasadena", 18),
     "Univ. of California - Irvine": ("Irvine", 40),
     "Univ. of California - Riverside": ("Riverside", 55),
     "Univ. of California - Santa Barbara": ("Santa Barbara", 109),
@@ -162,12 +111,12 @@ CSR_FETCH_BUDGET_S = 90.0
 CSR_FETCH_POLL_INTERVAL_S = 5.0
 
 
-def _fetch_csrankings_csv_with_retry() -> str:
-    """Fetch generated-author-info.csv from csrankings.org with retry budget.
+def _fetch_csrankings_file_with_retry(url: str, label: str, min_bytes: int) -> str:
+    """Fetch a CSRankings CSV file with retry budget.
 
     csrankings.org occasionally serves slow / 5xx; the grader cannot run
     without this file, so we poll up to CSR_FETCH_BUDGET_S total.  Any
-    successful 200 response with non-trivial body short-circuits.
+    successful response with non-trivial body short-circuits.
     """
     deadline = time.time() + CSR_FETCH_BUDGET_S
     attempt = 0
@@ -176,13 +125,13 @@ def _fetch_csrankings_csv_with_retry() -> str:
         attempt += 1
         try:
             req = urllib.request.Request(
-                CSR_AUTHORS_URL,
+                url,
                 headers={"User-Agent": "Toolathlon-grader/1.0"},
             )
             with urllib.request.urlopen(req, timeout=30) as r:
                 body = r.read().decode("utf-8", errors="ignore")
-            if len(body) > 1_000_000:  # sanity: real file is ~30 MB; reject obvious truncation
-                print(f"Fetched CSRankings CSV ({len(body)} bytes) on attempt {attempt}")
+            if len(body) > min_bytes:
+                print(f"Fetched {label} ({len(body)} bytes) on attempt {attempt}")
                 return body
             last_err = f"unexpectedly small body ({len(body)} bytes)"
         except (urllib.error.URLError, urllib.error.HTTPError, OSError, TimeoutError) as e:
@@ -194,17 +143,44 @@ def _fetch_csrankings_csv_with_retry() -> str:
         print(f"  attempt {attempt}: {last_err}; sleeping {sleep_for:.1f}s")
         time.sleep(sleep_for)
     raise RuntimeError(
-        f"Failed to fetch CSRankings CSV after {attempt} attempt(s): {last_err}"
+        f"Failed to fetch {label} after {attempt} attempt(s): {last_err}"
     )
 
 
-def _compute_us_top30_ranks(csv_body: str) -> list:
-    """Return [(dept, rank)] for US top-30 in AI ex-IR for CSR_TARGET_YEAR.
+def _fetch_csrankings_csv_with_retry() -> str:
+    # generated-author-info.csv is large; reject obvious truncation.
+    return _fetch_csrankings_file_with_retry(
+        CSR_AUTHORS_URL,
+        "CSRankings generated-author-info.csv",
+        min_bytes=1_000_000,
+    )
+
+
+def _fetch_csrankings_institutions_with_retry() -> str:
+    return _fetch_csrankings_file_with_retry(
+        CSR_INSTITUTIONS_URL,
+        "CSRankings institutions.csv",
+        min_bytes=1_000,
+    )
+
+
+def _parse_us_institutions(institutions_body: str) -> set:
+    reader = csv.DictReader(io.StringIO(institutions_body))
+    return {
+        row["institution"]
+        for row in reader
+        if row.get("countryabbrv") == "us" and row.get("institution")
+    }
+
+
+def _compute_us_top30_ranks(csv_body: str, us_institutions: set) -> list:
+    """Return [(dept, rank)] for US rank <= 30 in AI ex-IR for CSR_TARGET_YEAR.
 
     Uses CSRankings' own scoring algorithm: per (dept, area) sum of
     adjustedcount within the year, then geometric mean of (1 + count)
-    across the 4 AI areas minus 1.  Ties broken by department name
-    ascending (same convention CSRankings uses).
+    across the 4 AI areas. CSRankings displays rankings after rounding
+    scores to 1 decimal place, then assigns competition ranks
+    (1, 2, 2, 4) with tied schools sorted by department name.
     """
     counts = defaultdict(lambda: defaultdict(float))
     reader = csv.DictReader(io.StringIO(csv_body))
@@ -222,22 +198,36 @@ def _compute_us_top30_ranks(csv_body: str) -> list:
         except (ValueError, KeyError):
             continue
 
-    ranked = []
+    ranked_us = []
     for dept, by_area in counts.items():
+        if dept not in us_institutions:
+            continue
         prod = 1.0
         for a in CSR_AREAS:
             prod *= 1.0 + by_area.get(a, 0.0)
-        geo = prod ** (1.0 / len(CSR_AREAS)) - 1.0
-        ranked.append((geo, dept))
-    # Sort by geomean desc, then department name asc
-    ranked.sort(key=lambda x: (-x[0], x[1]))
+        score = prod ** (1.0 / len(CSR_AREAS))
+        display_score = math.floor(10.0 * score + 0.5) / 10.0
+        ranked_us.append((display_score, dept))
+
+    # CSRankings sorts after rounding displayed scores. Equal displayed
+    # scores are ties; within a tie group departments sort alphabetically.
+    ranked_us.sort(key=lambda x: (-x[0], x[1]))
 
     us_top30 = []
-    for geo, dept in ranked:
-        if dept in US_INSTITUTIONS:
-            us_top30.append((dept, len(us_top30) + 1))
-            if len(us_top30) == 30:
-                break
+    ties = 1
+    rank = 0
+    old_score = None
+    for display_score, dept in ranked_us:
+        if display_score == 0.0:
+            break
+        if old_score != display_score:
+            rank += ties
+            ties = 0
+        if rank > 30:
+            break
+        us_top30.append((dept, rank))
+        ties += 1
+        old_score = display_score
     return us_top30
 
 
@@ -250,7 +240,9 @@ def compute_expected_live() -> list:
     distance table; no human-curated frozen file.
     """
     csv_body = _fetch_csrankings_csv_with_retry()
-    us_top30 = _compute_us_top30_ranks(csv_body)
+    institutions_body = _fetch_csrankings_institutions_with_retry()
+    us_institutions = _parse_us_institutions(institutions_body)
+    us_top30 = _compute_us_top30_ranks(csv_body, us_institutions)
     print(f"CSRankings live US top-30 for {CSR_TARGET_YEAR} AI (ex-IR):")
     for dept, rank in us_top30:
         in_range = "  ≤500mi" if dept in DISTANCES_MILES else ""
@@ -285,6 +277,19 @@ def compute_expected_live() -> list:
         })
     expected.sort(key=lambda x: (x["car_drive_miles"], x["cs_ranking_rank"]))
     return expected
+
+
+def load_fallback_groundtruth(groundtruth_workspace: str) -> list:
+    fallback_workspace = groundtruth_workspace or os.path.join(
+        os.path.dirname(__file__), "..", "groundtruth_workspace"
+    )
+    fallback_file = os.path.join(fallback_workspace, "AI_univ_LA_500miles_Top30_2024.json")
+    print(
+        "WARNING: Live CSRankings fetch/compute failed; falling back to "
+        f"precomputed groundtruth at {fallback_file}. This fallback may be stale "
+        "or inaccurate because CSRankings data can change."
+    )
+    return read_json(fallback_file)
 
 
 # ── Comparison ──────────────────────────────────────────────────────────
@@ -335,7 +340,10 @@ def check(needed_info, groundtruth_info, allow_adjacent_swap_if_close: bool = Tr
             # CSRankings dept names (which use "Univ.") and any "University"
             # variant from the agent compare equal after normalize_str.
             def _expand(s):
-                return s.replace("Univ.", "University").replace("univ.", "university")
+                return (s.replace("Univ.", "University")
+                         .replace("univ.", "university")
+                         .replace("Inst.", "Institute")
+                         .replace("inst.", "institute"))
             agent_uni = _expand(given_school['university'])
             expected_uni = _expand(gt_school['university'])
             if normalize_str(agent_uni) != normalize_str(expected_uni):
@@ -367,7 +375,11 @@ async def main(args):
         groundtruth_info = compute_expected_live()
     except Exception as e:
         print(f"Failed to compute live groundtruth from CSRankings: {e}")
-        return False
+        try:
+            groundtruth_info = load_fallback_groundtruth(args.groundtruth_workspace)
+        except Exception as fallback_error:
+            print(f"Failed to load fallback groundtruth: {fallback_error}")
+            return False
 
     print(f"\nExpected {len(groundtruth_info)} schools at this CSRankings snapshot:")
     for s in groundtruth_info:
