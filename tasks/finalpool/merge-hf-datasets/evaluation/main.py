@@ -24,6 +24,16 @@ _TYPE_ALIASES = {
 }
 
 
+def _canonical_type_name(value: str):
+    """Return canonical JSON Schema type name for common source spellings."""
+    parts = [p.strip().lower() for p in value.split(",")]
+    for part in parts:
+        canonical = _TYPE_ALIASES.get(part)
+        if canonical is not None:
+            return canonical
+    return None
+
+
 def normalize_value_for_comparison(value, path=""):
     """Normalize value for comparison, handling known acceptable differences."""
     if isinstance(value, str):
@@ -32,7 +42,7 @@ def normalize_value_for_comparison(value, path=""):
         # identical schemas compare equal regardless of which spelling
         # the source dataset (or the agent's conversion) chose.
         if path.endswith(".type"):
-            canonical = _TYPE_ALIASES.get(value.strip().lower())
+            canonical = _canonical_type_name(value)
             if canonical is not None:
                 return canonical
         # Normalize JSON string values
