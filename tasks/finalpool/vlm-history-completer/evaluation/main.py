@@ -249,10 +249,8 @@ def evaluate_field(submitted: str, expected: Union[str, list], field_name: str) 
     elif field_name == "Sources":
         # Empty expected list = "any non-empty submission is acceptable".
         # Used for entries whose canonical URL is dead and where no
-        # clearly-correct alternative exists (e.g. Make-a-Scene: Meta's
-        # original blog returns HTTP 400 with no canonical replacement on
-        # a non-HuggingFace domain).  The cell still occupies a slot in
-        # the score denominator, but the model gets credit if it submits
+        # clearly-correct alternative exists. The cell still occupies a slot
+        # in the score denominator, but the model gets credit if it submits
         # any reasonable text (URL, "unavailable", etc.).
         if not expected:
             return bool((submitted or "").strip())
