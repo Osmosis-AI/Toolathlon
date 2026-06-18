@@ -83,8 +83,8 @@ def check_paper_repositories_codeurl(args):
         {
             "file": "_publications/2024-05-15-enhancing-llms.md",
             "name": "Enhancing LLMs",
-            "status": "released",  # Released - has complete implementation
-            "expected_codeurl": f"https://github.com/{args.user_name}/enhancing-llms"
+            "status": "no_released_repo",
+            "expected_codeurl": None
         },
         {
             "file": "_publications/2025-06-01-ipsum-lorem-all-you-need.md", 
@@ -101,7 +101,13 @@ def check_paper_repositories_codeurl(args):
         {
             "file": "_publications/2025-07-01-optimizing-llms-contextual-reasoning.md",
             "name": "Optimizing LLMs",
-            "status": "to_be_released",  # README shows "🚧 To be released"
+            "status": "optional_codeurl",
+            "expected_codeurl": f"https://github.com/{args.user_name}/optimizing-llms-contextual-reasoning"
+        },
+        {
+            "file": "_publications/2025-06-15-ipsum-lorem-workshop.md",
+            "name": "Ipsum Lorem Workshop",
+            "status": "no_released_repo",
             "expected_codeurl": None
         }
     ]
@@ -140,13 +146,28 @@ def check_paper_repositories_codeurl(args):
             
             print(f"  ✅ Released paper {paper['name']} has correct codeurl: {codeurl_data}")
             
-        elif paper['status'] == 'to_be_released':
-            # To-be-released papers should NOT have codeurl
-            if codeurl_data:
-                print(f"ERROR: To-be-released paper {paper['name']} should not have codeurl, but found: {codeurl_data}")
+        elif paper['status'] == 'optional_codeurl':
+            # This repository is ambiguous: a missing codeurl is acceptable,
+            # but if one is present it must point to the correct repository.
+            if not codeurl_data:
+                print(f"  ✅ Paper {paper['name']} has no codeurl, which is acceptable")
+                continue
+
+            if codeurl_data != paper['expected_codeurl']:
+                print(f"ERROR: Paper {paper['name']} has incorrect codeurl")
+                print(f"  Expected: {paper['expected_codeurl']} or no codeurl")
+                print(f"  Actual: {codeurl_data}")
                 exit(1)
-            
-            print(f"  ✅ To-be-released paper {paper['name']} correctly has no codeurl")
+
+            print(f"  ✅ Paper {paper['name']} has acceptable codeurl: {codeurl_data}")
+
+        elif paper['status'] == 'no_released_repo':
+            # Papers without a released repository should NOT have codeurl.
+            if codeurl_data:
+                print(f"ERROR: Paper {paper['name']} should not have codeurl, but found: {codeurl_data}")
+                exit(1)
+
+            print(f"  ✅ Paper {paper['name']} correctly has no codeurl")
     
     print("All paper repository codeurl checks passed.")
 
