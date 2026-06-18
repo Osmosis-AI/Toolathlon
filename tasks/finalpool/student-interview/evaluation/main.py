@@ -121,7 +121,7 @@ def validate_interview_time(interview, tomorrow_date, the_day_after_tomorrow_dat
             start_time = parse_iso_time(interview['start_time']['dateTime'])
             end_time = parse_iso_time(interview['end_time']['dateTime'])
             if check_time_overlap(event_start_dt, event_end_dt, start_time, end_time):
-                issues.append(f"❌ {student}: Interview conflicts with {interview['student']} ({interview['start_time'].strftime('%H:%M')}-{interview['end_time'].strftime('%H:%M')})")
+                issues.append(f"❌ {student}: Interview conflicts with {interview['student']} ({start_time.strftime('%H:%M')}-{end_time.strftime('%H:%M')})")
                 return False, issues
     
     already_scheduled_interviews.append(interview)
