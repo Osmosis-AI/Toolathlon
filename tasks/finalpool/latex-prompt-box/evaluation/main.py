@@ -13,16 +13,19 @@ def find_package_import(tex_content: str) -> bool:
     
     return re.search(pattern, tex_content) is not None
 
-def find_color_definition(tex_content: str) -> bool:
-    return '\n'+r'\definecolor{lightProxYellow}{HTML}{ffbb00}' in tex_content
+def find_color_definition(tex_content: str):
+    # Accept any variable name bound to HTML ffbb00 (visual colour is what matters).
+    # Returns the variable name (str) on success, or None.
+    m = re.search(r'\\definecolor\{(\w+)\}\{HTML\}\{ffbb00\}', tex_content, re.IGNORECASE)
+    return m.group(1) if m else None
 
-def find_desired_tcolorbox_remove_blanks(tex_content: str, title: str) -> str:
+def find_desired_tcolorbox_remove_blanks(tex_content: str, title: str, color_var: str = "lightProxYellow") -> str:
     # Remove all white space characters
     removed_blanks_tex_content = re.sub(r'\s+', '', tex_content)
     # print(removed_blanks_tex_content)
-    
+
     # Build the pattern to match (also removes whitespace)
-    first_part = r"\begin{tcolorbox}[colback=lightProxYellow!10,colframe=lightProxYellow,left=2mm,right=2mm,title=\textcolor{black}{\textbf{<<<<title>>>>}}]\begin{small}"
+    first_part = r"\begin{tcolorbox}[colback=" + color_var + r"!10,colframe=" + color_var + r",left=2mm,right=2mm,title=\textcolor{black}{\textbf{<<<<title>>>>}}]\begin{small}"
     first_part = first_part.replace("<<<<title>>>>", title)
     first_part = re.sub(r'\s+', '', first_part)
     # print(first_part)
@@ -71,15 +74,16 @@ def main():
         print("Not found package import in any tex file")
         return False
 
-    foundcolor = False
+    color_var = None
     for tex_file in tex_file_list:
         tex_content = read_file(os.path.join(args.agent_workspace, "simplerlcolm25",tex_file))
-        if find_color_definition(tex_content):
-            print(f"Found color definition in {tex_file}")
-            foundcolor = True
+        cv = find_color_definition(tex_content)
+        if cv:
+            print(f"Found color definition '{cv}' (HTML ffbb00) in {tex_file}")
+            color_var = cv
             break
-    if not foundcolor:
-        print("Not found color definition in any tex file")
+    if not color_var:
+        print("Not found color definition (any name) bound to HTML ffbb00 in any tex file")
         return False
     
 
@@ -93,7 +97,7 @@ def main():
     needed_appendix_text_content = appendix_text_content.split(r"\section{Model Prompt}")[-1]
 
     for title, gt in GT_MAPPING.items():
-        content = find_desired_tcolorbox_remove_blanks(needed_appendix_text_content, title)
+        content = find_desired_tcolorbox_remove_blanks(needed_appendix_text_content, title, color_var=color_var)
         if content is None:
             print(f"Not found desired tcolorbox in {title}")
             founddesiredtcolorbox_dict[title] = False
