@@ -333,23 +333,36 @@ def get_page_by_id(page_id: str, token: str) -> Dict:
 
 def get_page_content_as_text(page_id: str, token: str) -> str:
     """Get page content as plain text with markdown-style formatting"""
-    url = f"https://api.notion.com/v1/blocks/{page_id}/children"
+    base_url = f"https://api.notion.com/v1/blocks/{page_id}/children"
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
         "Notion-Version": "2022-06-28"
     }
 
-    try:
-        response = _notion_request("GET", url, headers=headers)
-        response.raise_for_status()
-    except requests.exceptions.RequestException as e:
-        raise Exception(f"Failed to get Notion page blocks: {e}")
+    # Paginate: Notion returns up to 100 children per page.  Pages with more
+    # blocks would otherwise be silently truncated at block #100, causing
+    # tail sections to be reported as missing by callers.
+    all_results = []
+    cursor = None
+    while True:
+        url = base_url + (
+            f"?start_cursor={cursor}&page_size=100" if cursor else "?page_size=100"
+        )
+        try:
+            response = _notion_request("GET", url, headers=headers)
+            response.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            raise Exception(f"Failed to get Notion page blocks: {e}")
+        page = response.json()
+        all_results.extend(page.get('results', []))
+        if not page.get('has_more'):
+            break
+        cursor = page.get('next_cursor')
 
-    blocks = response.json()
     content_parts = []
 
-    for block in blocks.get('results', []):
+    for block in all_results:
         block_type = block.get('type', '')
 
         if block_type in ['paragraph', 'heading_1', 'heading_2', 'heading_3', 'bulleted_list_item', 'numbered_list_item']:
