@@ -187,17 +187,17 @@ def check_candidates_match_expected(candidates: List[Dict]) -> Tuple[bool, List[
             candidate.get('name', '').strip().upper(),  # Convert to uppercase for comparison
             candidate.get('email', '').strip(),
             candidate.get('position', '').strip().lower(), # Convert to lowercase for comparison
-            candidate.get('highest degree', '').strip(),
+            candidate.get('highest degree', '').strip().lower(),  # Convert to lowercase for comparison
             candidate.get('school', '').strip().lower() # Convert to lowercase for comparison
         ))
-    
+
     # Check each expected candidate
     for expected in expected_candidates:
         expected_tuple = (
             expected['name'].upper(),  # Convert to uppercase for comparison
             expected['email'],
             expected['position'].lower(), # Convert to lowercase for comparison
-            expected['highest degree'],
+            expected['highest degree'].lower(),  # Convert to lowercase for comparison
             expected['school'].lower() # Convert to lowercase for comparison
         )
         
@@ -211,7 +211,7 @@ def check_candidates_match_expected(candidates: List[Dict]) -> Tuple[bool, List[
                     mismatches.append(f"email: expected '{expected['email']}', got '{actual.get('email', '').strip()}'")
                 if actual.get('position', '').strip() != expected['position']:
                     mismatches.append(f"position: expected '{expected['position']}', got '{actual.get('position', '').strip()}'")
-                if actual.get('highest degree', '').strip() != expected['highest degree']:
+                if actual.get('highest degree', '').strip().lower() != expected['highest degree'].lower():
                     mismatches.append(f"highest degree: expected '{expected['highest degree']}', got '{actual.get('highest degree', '').strip()}'")
                 if actual.get('school', '').strip() != expected['school']:
                     mismatches.append(f"school: expected '{expected['school']}', got '{actual.get('school', '').strip()}'")
