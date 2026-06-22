@@ -1018,21 +1018,28 @@ async def async_main(args):
                         return float(f"{float(x):.4f}")
 
                     cmp_pairs = [
-                        (exp_metrics.get("total_return_pct", 0.0),     bt_metrics_notion.get("total_return_pct", 0.0),     "Total Return %",      0.05),
-                        (exp_metrics.get("annualized_return_pct", 0.0), bt_metrics_notion.get("annualized_return_pct", 0.0), "Annualized Return %", 0.05),
-                        (exp_metrics.get("sharpe_ann", 0.0),            bt_metrics_notion.get("sharpe_ann", 0.0),            "Sharpe (ann.)",       0.05),
-                        (exp_metrics.get("win_rate_pct", 0.0),          bt_metrics_notion.get("win_rate_pct", 0.0),          "Win Rate %",          0.01),
-                        (exp_metrics.get("max_drawdown_pct", 0.0),      bt_metrics_notion.get("max_drawdown_pct", 0.0),      "Max Drawdown %",      0.05),
+                        (exp_metrics.get("total_return_pct", 0.0),     bt_metrics_notion.get("total_return_pct", 0.0),     "Total Return %",      0.05, False),
+                        (exp_metrics.get("annualized_return_pct", 0.0), bt_metrics_notion.get("annualized_return_pct", 0.0), "Annualized Return %", 0.05, False),
+                        (exp_metrics.get("sharpe_ann", 0.0),            bt_metrics_notion.get("sharpe_ann", 0.0),            "Sharpe (ann.)",       0.05, False),
+                        (exp_metrics.get("win_rate_pct", 0.0),          bt_metrics_notion.get("win_rate_pct", 0.0),          "Win Rate %",          0.01, False),
+                        # Max Drawdown: compare absolute magnitudes — the sign convention (positive
+                        # value vs. signed-negative loss) varies in financial reporting and is not
+                        # specified in the task; tolerate either.
+                        (exp_metrics.get("max_drawdown_pct", 0.0),      bt_metrics_notion.get("max_drawdown_pct", 0.0),      "Max Drawdown %",      0.05, True),
                     ]
-                    for ev, av, name, tolerance in cmp_pairs:
+                    for ev, av, name, tolerance, sign_agnostic in cmp_pairs:
                         try:
                             evf, avf = float(ev), float(av)
                         except Exception:
                             evf, avf = 0.0, 0.0
-                        if abs(evf - avf) > tolerance:
+                        if sign_agnostic:
+                            evf_cmp, avf_cmp = abs(evf), abs(avf)
+                        else:
+                            evf_cmp, avf_cmp = evf, avf
+                        if abs(evf_cmp - avf_cmp) > tolerance:
                             errors.append(f"Backtest metrics inconsistent: {name} expected {evf:.4f} actual {avf:.4f}")
                         else:
-                            print(f"  ✅ {name}: expected {evf:.4f} actual {avf:.4f} (Δ={abs(evf-avf):.4f} ≤ tol {tolerance})")
+                            print(f"  ✅ {name}: expected {evf:.4f} actual {avf:.4f} (Δ={abs(evf_cmp-avf_cmp):.4f} ≤ tol {tolerance})")
 
                     # Compare period start/end & cost assumption
                     exp_period_start = expected_seq[0]["m"] if expected_seq else ""
@@ -1042,8 +1049,12 @@ async def async_main(args):
                     if (bt_metrics_notion.get("period_end") or "") != exp_period_end:
                         errors.append(f"Backtest metrics inconsistent: Period End expected {exp_period_end} actual {bt_metrics_notion.get('period_end')}")
                     cost = (bt_metrics_notion.get("cost_assumption") or "").strip()
-                    if cost != "0.40% round-trip":
-                        errors.append(f"Backtest metrics inconsistent: Cost Assumption expected '0.40% round-trip' actual '{cost}'")
+                    # Accept any phrasing that mentions both "0.40%" (or 0.4%) and "round-trip".
+                    # The spec specifies the economic concept, not an exact display string.
+                    import re as _re_cost
+                    if not _re_cost.search(r'0?\.?40?\s*%', cost) or \
+                       not _re_cost.search(r'round[\s\-]?trip', cost, _re_cost.IGNORECASE):
+                        errors.append(f"Backtest metrics inconsistent: Cost Assumption expected something like '0.40% round-trip' actual '{cost}'")
 
                     # Compare each trade 1:1 by chronological order
                     if len(exp_trades) != len(bt_trades_notion):

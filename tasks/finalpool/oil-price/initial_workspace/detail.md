@@ -15,3 +15,4 @@
 
   - When Type=Metric: fill in `Period Start`, `Period End`, `Trades`, `Total Return %`, `Annualized Return %`, `Sharpe (ann.)`, `Win Rate %`, `Max Drawdown %`, `Cost Assumption`;
   - When Type=Trade: fill in `Entry Month`, `Exit Month`, `Signal`, `Entry Spread`, `Exit Spread`, `Leg Returns %`, `Net PnL %`, `Notes`.
+  - All month labels (e.g. `Entry Month`, `Exit Month`, `Period Start`, `Period End`) use the format `YYYY-MM` (e.g. `2025-06`).
