@@ -51,9 +51,7 @@
         "Architecture": [
             "Transformer-based"
         ],
-        "Sources": [
-            "https://ai.meta.com/blog/greater-creative-control-for-ai-image-generation/"
-        ]
+        "Sources": []
     },
     {
         "Model": "StableDiffusion 1",
