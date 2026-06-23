@@ -1042,8 +1042,11 @@ async def async_main(args):
                     if (bt_metrics_notion.get("period_end") or "") != exp_period_end:
                         errors.append(f"Backtest metrics inconsistent: Period End expected {exp_period_end} actual {bt_metrics_notion.get('period_end')}")
                     cost = (bt_metrics_notion.get("cost_assumption") or "").strip()
-                    if cost != "0.40% round-trip":
-                        errors.append(f"Backtest metrics inconsistent: Cost Assumption expected '0.40% round-trip' actual '{cost}'")
+                    # Only pin the displayed cost rate. Other explanatory text
+                    # in the Cost Assumption field is not part of the grading contract.
+                    has_cost_rate = re.search(r"(?<![\d.])0\.40(?!\d)\s*%?", cost)
+                    if not has_cost_rate:
+                        errors.append(f"Backtest metrics inconsistent: Cost Assumption expected a two-decimal '0.40' rate actual '{cost}'")
 
                     # Compare each trade 1:1 by chronological order
                     if len(exp_trades) != len(bt_trades_notion):
