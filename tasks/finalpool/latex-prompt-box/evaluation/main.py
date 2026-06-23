@@ -13,9 +13,16 @@ def find_package_import(tex_content: str) -> bool:
     
     return re.search(pattern, tex_content) is not None
 
+# M-STaR's example_paper.tex defines proxYellow TWICE — the first as HTML
+# ffbb00, the second as HTML ff9100, and the second overrides.  Agents
+# following the rendered paper legitimately pick ff9100; agents reading
+# the first definition pick ffbb00.  Accept either.
+_ACCEPTED_YELLOWS = ("ffbb00", "ff9100")
+
+
 def find_color_definition(tex_content: str) -> bool:
     direct_expected = re.compile(
-        r'\\definecolor\{lightProxYellow\}\{HTML\}\{ffbb00\}',
+        r'\\definecolor\{lightProxYellow\}\{HTML\}\{(?:ffbb00|ff9100)\}',
         flags=re.IGNORECASE,
     )
     if direct_expected.search(tex_content):
@@ -27,10 +34,24 @@ def find_color_definition(tex_content: str) -> bool:
 
     for match in re.finditer(r'\\colorlet\{lightProxYellow\}\{([^{}!]+)(?:![^{}]+)?\}', tex_content):
         source_color = match.group(1).strip()
-        if color_definitions.get(source_color) == "ffbb00":
+        if color_definitions.get(source_color) in _ACCEPTED_YELLOWS:
             return True
 
     return False
+
+
+def _normalize_text_commands(s: str) -> str:
+    """Treat LaTeX text-mode commands as equivalent to their bare chars.
+
+    Inside a tcolorbox body, ``<`` ``>`` ``|`` are NOT LaTeX-reserved in
+    standard text mode, so agents may write them either as literal chars
+    or via the ``\\textless`` / ``\\textgreater`` / ``\\textbar`` kernel
+    commands.  Both render identically; treat them as equivalent.
+    """
+    s = s.replace(r'\textless', '<')
+    s = s.replace(r'\textgreater', '>')
+    s = s.replace(r'\textbar', '|')
+    return s
 
 def find_desired_tcolorbox_remove_blanks(tex_content: str, title: str) -> str:
     # Remove all white space characters
@@ -117,8 +138,14 @@ def main():
         filled_content = content
         # print("===== FILLED ======\n",filled_content)
         # print(gt)
-        # check if the filled_content startswith gt
-        if not filled_content.strip().startswith(gt.strip()):
+        # Check if the filled_content startswith gt — but first normalize
+        # interchangeable LaTeX text-mode kernel commands (\textless /
+        # \textgreater / \textbar) to their literal characters on both
+        # sides.  These render identically in text mode, so an agent
+        # that over-escapes them is still semantically correct.
+        normalized_filled = _normalize_text_commands(filled_content.strip())
+        normalized_gt = _normalize_text_commands(gt.strip())
+        if not normalized_filled.startswith(normalized_gt):
             print(f"Filled content does not start with {gt}")
             founddesiredtcolorbox_dict[title] = False
             break
