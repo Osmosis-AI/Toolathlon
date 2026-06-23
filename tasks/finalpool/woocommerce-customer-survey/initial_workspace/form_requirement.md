@@ -2,7 +2,6 @@
 
 ## Basic Information
 - **Title:** Customer Shopping Experience Feedback Survey  
-- **Description:** Thank you for your purchase! To better serve you, please take a few minutes to share your shopping experience.
 
 ## Required Questions
 
