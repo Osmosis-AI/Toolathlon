@@ -15,7 +15,7 @@ def find_package_import(tex_content: str) -> bool:
 
 def find_color_definition(tex_content: str) -> bool:
     direct_expected = re.compile(
-        r'\\definecolor\{lightProxYellow\}\{HTML\}\{ffbb00\}',
+        r'\\definecolor\{lightProxYellow\}\{HTML\}\{ff9100\}',
         flags=re.IGNORECASE,
     )
     if direct_expected.search(tex_content):
@@ -27,10 +27,18 @@ def find_color_definition(tex_content: str) -> bool:
 
     for match in re.finditer(r'\\colorlet\{lightProxYellow\}\{([^{}!]+)(?:![^{}]+)?\}', tex_content):
         source_color = match.group(1).strip()
-        if color_definitions.get(source_color) == "ffbb00":
+        if color_definitions.get(source_color) == "ff9100":
             return True
 
     return False
+
+
+def _normalize_text_commands(s: str) -> str:
+    s = s.replace(r'\textless', '<')
+    s = s.replace(r'\textgreater', '>')
+    s = s.replace(r'\textbar', '|')
+    return s
+
 
 def find_desired_tcolorbox_remove_blanks(tex_content: str, title: str) -> str:
     # Remove all white space characters
@@ -118,7 +126,9 @@ def main():
         # print("===== FILLED ======\n",filled_content)
         # print(gt)
         # check if the filled_content startswith gt
-        if not filled_content.strip().startswith(gt.strip()):
+        normalized_filled = _normalize_text_commands(filled_content.strip())
+        normalized_gt = _normalize_text_commands(gt.strip())
+        if not normalized_filled.startswith(normalized_gt):
             print(f"Filled content does not start with {gt}")
             founddesiredtcolorbox_dict[title] = False
             break
