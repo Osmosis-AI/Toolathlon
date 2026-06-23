@@ -14,10 +14,33 @@ def find_package_import(tex_content: str) -> bool:
     return re.search(pattern, tex_content) is not None
 
 def find_color_definition(tex_content: str):
-    # Accept any variable name bound to HTML ffbb00 (visual colour is what matters).
-    # Returns the variable name (str) on success, or None.
-    m = re.search(r'\\definecolor\{(\w+)\}\{HTML\}\{ffbb00\}', tex_content, re.IGNORECASE)
-    return m.group(1) if m else None
+    # M-STaR's example_paper.tex defines proxYellow TWICE — the first as HTML
+    # ffbb00, the second as HTML ff9100, and the second overrides.  Agents
+    # following the rendered paper legitimately pick ff9100; agents reading
+    # the first definition pick ffbb00.  Accept either.
+    #
+    # Returns the variable name (str) bound to the yellow HTML colour, or
+    # — if a \colorlet chain derives a "light" variant from that yellow
+    # (e.g. \colorlet{lightProxYellow}{proxYellow!50}) — returns the
+    # derived variant's name, since that's what the box style uses.
+    base = None
+    for hex_target in ("ffbb00", "ff9100"):
+        m = re.search(
+            rf'\\definecolor\{{(\w+)\}}\{{HTML\}}\{{{hex_target}\}}',
+            tex_content,
+            re.IGNORECASE,
+        )
+        if m:
+            base = m.group(1)
+            break
+    if not base:
+        return None
+    # Trace \colorlet{X}{base!N} → return X (the "light" derived variant).
+    m = re.search(
+        rf'\\colorlet\{{(\w+)\}}\{{{re.escape(base)}!\d+\}}',
+        tex_content,
+    )
+    return m.group(1) if m else base
 
 def find_desired_tcolorbox_remove_blanks(tex_content: str, title: str, color_var: str = "lightProxYellow") -> str:
     # Remove all white space characters
@@ -48,6 +71,22 @@ def read_file(file_path: str) -> str:
 
 GT_SIMPLE_PROMPT = r"Question:\\\{input\}\\Answer:\\Let's think step by step."
 GT_COMPLEX_PROMPT = r"<|im\_start|>system\\You are a helpful assistant.<|im\_end|>\\<|im\_start|>user\\\{input\}\\Please reason step by step, and put your final answer within \textbackslash\textbackslash boxed\{\}.\\<|im\_end|>\\<|im\_start|>assistant"
+
+
+def _normalize_text_commands(s: str) -> str:
+    """Treat LaTeX text-mode commands as equivalent to their bare chars.
+
+    Inside a tcolorbox body, ``<`` ``>`` ``|`` are NOT LaTeX-reserved in
+    standard text mode, so agents may write them either as literal chars
+    or via the ``\\textless`` / ``\\textgreater`` / ``\\textbar`` kernel
+    commands.  Both render identically; we treat them as equivalent.
+    """
+    s = s.replace(r'\textless', '<')
+    s = s.replace(r'\textgreater', '>')
+    s = s.replace(r'\textbar', '|')
+    return s
+
+
 GT_MAPPING = {"Simple Prompt": re.sub(r'\s+', '', GT_SIMPLE_PROMPT), "Complex Prompt": re.sub(r'\s+', '', GT_COMPLEX_PROMPT)}
 
 def main():
@@ -105,8 +144,12 @@ def main():
         filled_content = content
         # print("===== FILLED ======\n",filled_content)
         # print(gt)
-        # check if the filled_content startswith gt
-        if not filled_content.strip().startswith(gt.strip()):
+        # check if the filled_content startswith gt (after normalizing the
+        # interchangeable \textless / \textgreater / \textbar kernel commands
+        # to their bare-char equivalents on both sides).
+        normalized_filled = _normalize_text_commands(filled_content.strip())
+        normalized_gt = _normalize_text_commands(gt.strip())
+        if not normalized_filled.startswith(normalized_gt):
             print(f"Filled content does not start with {gt}")
             founddesiredtcolorbox_dict[title] = False
             break
