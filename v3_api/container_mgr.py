@@ -259,14 +259,16 @@ async def _run_setup(execution: ExecutionState) -> None:
         mcp_auth_host = (PROJECT_ROOT / "configs" / ".mcp-auth").resolve()
         mcp_auth_host.mkdir(parents=True, exist_ok=True)
         start_cmd += ["-v", f"{mcp_auth_host}:/workspace/configs/.mcp-auth"]
-        # Overlay the host-patched notion-openapi.json (widened schemas for
-        # post-page / patch-page so the MCP exposes database row mutations to
-        # the agent). The docker image bakes in v1.9.0's restrictive schema;
-        # this bind-mount swaps in the patched file at runtime without
-        # requiring an image rebuild.
+        # Overlay the repo-tracked patched notion-openapi.json (widened
+        # schemas for post-page / patch-page so the MCP exposes database
+        # row mutations to the agent). The docker image bakes in
+        # notion-mcp-server v1.9.0's restrictive schema; this bind-mount
+        # swaps in the patched file at runtime without requiring an
+        # image rebuild.  Source path is under the repo (configs/) rather
+        # than node_modules/ so it survives ``npm install`` and ships
+        # with the branch.
         notion_openapi_host = (
-            PROJECT_ROOT / "node_modules" / "@notionhq" / "notion-mcp-server"
-            / "scripts" / "notion-openapi.json"
+            PROJECT_ROOT / "configs" / "notion-mcp-patches" / "notion-openapi.json"
         ).resolve()
         if notion_openapi_host.is_file():
             start_cmd += [
