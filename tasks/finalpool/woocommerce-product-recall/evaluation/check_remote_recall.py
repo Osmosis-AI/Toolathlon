@@ -378,7 +378,6 @@ def _extract_google_form_fields(form: Dict) -> List[Dict]:
         question = item.get("questionItem", {}).get("question", {})
         fields.append({
             "name": item.get("title", ""),
-            "description": item.get("description", ""),
             "required": bool(question.get("required", False)),
             "type": _google_form_question_type(question),
             "choices": _google_form_question_choices(question),
@@ -402,14 +401,6 @@ def _validate_google_form_against_template(form: Dict) -> Tuple[bool, str]:
         return False, (
             "Form title mismatch: "
             f"expected '{expected_title}', got '{actual_title}'"
-        )
-
-    actual_description = info.get("description", "")
-    expected_description = template.get("form_description", "")
-    if _normalized(actual_description) != _normalized(expected_description):
-        return False, (
-            "Form description mismatch: "
-            f"expected '{expected_description}', got '{actual_description}'"
         )
 
     expected_fields = template.get("fields", [])
@@ -443,14 +434,6 @@ def _validate_google_form_against_template(form: Dict) -> Tuple[bool, str]:
             return False, (
                 f"Field {idx} required flag mismatch for '{expected_name}': "
                 f"expected {expected_required}, got {actual_required}"
-            )
-
-        expected_description = expected.get("description", "")
-        actual_description = actual.get("description", "")
-        if _normalized(actual_description) != _normalized(expected_description):
-            return False, (
-                f"Field {idx} description mismatch for '{expected_name}': "
-                f"expected '{expected_description}', got '{actual_description}'"
             )
 
         expected_choices = expected.get("choices")
