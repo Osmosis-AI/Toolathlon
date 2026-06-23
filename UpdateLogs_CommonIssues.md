@@ -85,6 +85,45 @@ Line churn is insertions plus deletions from `git diff --numstat`. Binary file c
 | [x] | Big | `search-ca-school` | 3 | 434 | 0 | Reviewed by user on 2026-06-17; evaluator aligned with live CSRankings displayed ranking semantics, including default-off KDD, US institutions from institutions.csv, competition-rank ties, updated fallback JSON, and stale-warning fallback |
 | [x] | Big | `merge-hf-datasets` | 2 | 1037 | 0 | Reviewed by user on 2026-06-17; XLAM groundtruth schema wrapper accepted and evaluator type aliases extended to optional type strings |
 
+# PR54 Task Review Tracker
+
+Source PR: https://github.com/hkust-nlp/Toolathlon/pull/54
+
+Branch under review: `toolathlon-tasks-verified-toreview`
+
+Initial scope is taken from the PR #54 body and changed-file list. As of the initial
+tracker setup, the GitHub connector returned no PR comments/review comments, so
+review progress starts from the PR body entries until thread-level feedback is
+available.
+
+Status legend:
+- `[ ]` not reviewed
+- `[~]` in review / needs discussion
+- `[x]` reviewed and accepted
+- `[!]` reviewed and needs follow-up fix
+
+| Status | Area | PR commit | Changed files | Claimed fix | Progress notes |
+| --- | --- | --- | --- | --- | --- |
+| [x] | `canvas-do-quiz` | `71a876bf` | `tasks/finalpool/canvas-do-quiz/evaluation/check_remote.py` | Read `kept_score` instead of latest-attempt `score` for pre-completed quizzes with leftover untaken attempts. | Accepted and applied; all configured quizzes use `keep_highest`, so the evaluator now prefers gradebook `kept_score` and falls back to latest-attempt `score`. |
+| [ ] | `university-course-selection` | `d762e4f2` | `tasks/finalpool/university-course-selection/evaluation/check_local.py` | Add softer field comparison for instructor titles, restrictions, `无`/empty cells, and class-time week ranges. | Pending review. |
+| [ ] | `update-material-inventory` | `2c934bd5` | `tasks/finalpool/update-material-inventory/preprocess/main.py`, `tasks/finalpool/update-material-inventory/preprocess/sheets_setup.py` | Capture real spreadsheet ID, write `config.json` into agent workspace, and add Sheets helper. | Pending review. |
+| [ ] | `latex-prompt-box` | `18e57f4f` | `tasks/finalpool/latex-prompt-box/evaluation/main.py` | Accept `ff9100` and normalize `\textless/\textbar/\textgreater` to literal `<>|`. | Pending review. |
+| [ ] | `sync-todo-to-readme` | `a1914277` | `tasks/finalpool/sync-todo-to-readme/docs/task.md`, `tasks/finalpool/sync-todo-to-readme/docs/task_cn.md` | Clarify README baseline and main-to-dev TODO diff scope. | Pending review. |
+| [ ] | `music-analysis` | `4b0796fd` | `tasks/finalpool/music-analysis/initial_workspace/music_analysis_result_example.xlsx` | Blank out `Weeks 1-1` for streak-zero example row to match ground truth. | Pending review. |
+| [ ] | `identify-all-songs` | `b6724574` | `tasks/finalpool/identify-all-songs/evaluation/check_content.py` | Accept `Nothin' on You` and `Nothing On You` as aliases. | Pending review. |
+| [ ] | `oil-price` | `22c61407` | `tasks/finalpool/oil-price/evaluation/main.py`, `tasks/finalpool/oil-price/initial_workspace/detail.md` | Make max drawdown sign-agnostic, tolerate cost regex variants, and clarify YYYY-MM. | Pending review. |
+| [ ] | `notion-hr` | `5fc224ba` | `tasks/finalpool/notion-hr/evaluation/main.py` | Compare Highest Degree case-insensitively. | Pending review. |
+| [ ] | `k8s-mysql` GT | `4f077c26` | `tasks/finalpool/k8s-mysql/groundtruth_workspace/gtq2.csv` | Regenerate `gtq2.csv` from natural-reading SQL, changing driver count from 3 to 104. | Pending review. |
+| [ ] | `notion` utility | `b5adff73` | `utils/app_specific/notion/ops.py` | Paginate `get_page_content_as_text` with `has_more` / `start_cursor`. | Pending review. |
+| [ ] | `wandb-shortest-length` | `9018ae1e` | `tasks/finalpool/wandb-shortest-length/evaluation/main.py` | Accept either strict multiples of 100 or inclusive final checkpoint. | Pending review. |
+| [ ] | `detect-revised-terms` | `e6ba91b7` | `tasks/finalpool/detect-revised-terms/evaluation/check_content.py`, `tasks/finalpool/detect-revised-terms/groundtruth_workspace/revised_terms.csv` | Add semantic citation matching for punctuation, parentheses, Chinese digits, article multisets, and substring direction. | Pending review. |
+| [ ] | `email-paper-homepage` | `046553d1` | `tasks/finalpool/email-paper-homepage/docs/task.md`, `tasks/finalpool/email-paper-homepage/evaluation/main.py` | Broaden scope to all accepted/published papers and make URL-shape grading more robust. | Pending review. |
+| [ ] | `vlm-history-completer` | `30f1d57c` | `tasks/finalpool/vlm-history-completer/groundtruth_workspace/groundtruth.json` | Expand SD-1.5 ground truth with canonical aliases. | Pending review. |
+| [ ] | `nvidia-stock-analysis` | `511beb69` | `tasks/finalpool/nvidia-stock-analysis/evaluation/main.py` | Add cached yfinance share-count snapshot to stabilize revised historical share counts. | Pending review. |
+| [ ] | `privacy-desensitization` | `d13d85b3` | `tasks/finalpool/privacy-desensitization/docs/task.md`, `tasks/finalpool/privacy-desensitization/evaluation/main.py` | Replace exact redaction equality with F1 span grading and clarify vanity phone/debit/bank scope. | Pending review. |
+| [ ] | `merge-hf-datasets` | `69105207` | `tasks/finalpool/merge-hf-datasets/evaluation/main.py` | Add JSON-Schema type aliases, semantic tool-message comparison, and `required: null` tolerance. | Pending review. |
+| [ ] | Notion MCP schema data | `f58b59be` | `configs/notion-mcp-patches/notion-openapi.json` | Widen Notion schema `parent.oneOf` and allow additional page properties for database row mutations. | Pending review. |
+
 # PR38 Task Review Tracker
 
 Source PR: https://github.com/hkust-nlp/Toolathlon/pull/38
@@ -128,4 +167,3 @@ current-branch comparison.
 ## Review Log
 
 - Pending.
-
