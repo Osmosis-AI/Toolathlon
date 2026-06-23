@@ -1,9 +1,74 @@
 # Standard library imports for file system operations and data manipulation
 import os
+import re
 import pandas as pd
 from typing import Tuple, Optional
 from itertools import permutations
 from utils.general.helper import normalize_str
+
+
+# Common Chinese academic title suffixes that may follow an instructor name
+# in the source PDF.  Agents often copy the full ``<name> <title>`` cell
+# verbatim, while the GT keeps only the name.  These are stylistic, not
+# semantic — strip them on both sides before comparing.
+_TITLE_TOKENS = (
+    "青年副研究员", "青年研究员", "高级工程师", "教学为主型",
+    "副教授", "副研究员", "助理研究员", "助理教授",
+    "研究员", "工程师", "讲师", "教授",
+)
+
+
+def _strip_instructor_title(s: str) -> str:
+    """Remove trailing title token (with optional parenthetical) from a
+    Chinese instructor name like '陈彤兵 讲师' → '陈彤兵',
+    '龚金平 教授(教学为主型)' → '龚金平'."""
+    if s is None or (isinstance(s, float) and pd.isna(s)):
+        return ""
+    s = str(s).strip()
+    # remove trailing parenthetical first: '教授(教学为主型)' / '教授（教学为主型）'
+    s = re.sub(r'[（(][^）)]*[）)]\s*$', '', s).strip()
+    for tok in _TITLE_TOKENS:
+        # allow optional whitespace before the title at the end
+        if s.endswith(tok):
+            s = s[: -len(tok)].rstrip()
+            break
+    return s
+
+
+def _strip_classtime_weeks(s: str) -> str:
+    """Drop trailing week-range like ' [1-16]' from a Class Time cell."""
+    if s is None or (isinstance(s, float) and pd.isna(s)):
+        return ""
+    return re.sub(r'\s*[\[【][^\]】]*[\]】]\s*$', '', str(s).strip())
+
+
+def _restriction_tokens(s) -> frozenset:
+    """Tokenize a Course Selection Restrictions cell into a multiset of
+    canonical fragments.
+
+    The cell contains a list of qualifying-student descriptors separated
+    by arbitrary whitespace / commas / parentheses in the source PDF.
+    Agents may emit them in a different order or with different
+    separators than the GT — but the *set* of fragments is what carries
+    the meaning.  '无' and an empty cell both mean 'no restrictions'."""
+    if s is None or (isinstance(s, float) and pd.isna(s)):
+        return frozenset()
+    text = str(s).strip()
+    if not text or text in ("无", "無"):
+        return frozenset()
+    # Split on whitespace, full/half-width commas, semicolons, slashes.
+    parts = re.split(r'[\s,，;；/\\]+', text)
+    out = []
+    for p in parts:
+        p = p.strip().strip("()（）")
+        if not p:
+            continue
+        # Drop standalone year-prefix tokens like '23'/'22级' that some
+        # agents merge into a single phrase ('23 22 X' vs '23级 22级 X')
+        # so the multiset matches regardless of whether the agent
+        # attached the '级' suffix.
+        out.append(re.sub(r'级$', '', p))
+    return frozenset(out)
 
 def check_local(agent_workspace: str, groundtruth_workspace: str, en_mode=True) -> Tuple[bool, Optional[str]]:
     """
@@ -28,41 +93,64 @@ def check_local(agent_workspace: str, groundtruth_workspace: str, en_mode=True) 
         REQUIRED_COLUMNS = ['Course name', 'Course ID', 'Instructor', 'Campus', 'Class Time', 'Enrollment', 'Credits', 'Assessment Method', 'Exam Time', 'Course Selection Restrictions']
     
     def clean_dataframe(df, cols):
-        """Clean DataFrame, remove empty rows and invalid data"""
-        # Extract the required columns
+        """Clean DataFrame, remove empty rows.
+
+        Previously this also dropped rows where *any* required column
+        was empty, which over-prunes legitimate agent rows whose
+        Course-Selection-Restrictions cell is blank for unrestricted
+        courses (the GT writes '无' there, but an empty cell is a
+        common and semantically-equivalent choice).  Now we only drop
+        rows whose *Course ID* column is missing — that's the row key,
+        and an empty key really does mean a junk row."""
         subset = df[cols].copy()
-        
-        # Remove all rows where all specified columns are empty
         subset = subset.dropna(how='all', subset=cols)
-        
-        # Remove rows where any specified column is empty or only contains empty strings
-        for col in cols:
-            mask = subset[col].apply(lambda x: str(x).strip() != '' and not pd.isna(x))
+        # Key column varies by language mode
+        key_candidates = [c for c in ("Course ID", "课程代码") if c in cols]
+        if key_candidates:
+            key = key_candidates[0]
+            mask = subset[key].apply(lambda x: str(x).strip() != '' and not pd.isna(x))
             subset = subset[mask]
-        
-        # Reset the index
         return subset.reset_index(drop=True)
     
-    def smart_compare(val1, val2):
-        """Smart compare two values, handle numeric and string types"""
-        # Handle NaN values
+    # Columns that get field-specific canonicalization (rather than the
+    # default normalize_str equality).  Each entry maps the column name
+    # to a callable ``(val) -> comparable_key`` — values match iff the
+    # keys are equal.  The point is to absorb known stylistic variation
+    # between the agent's PDF-extracted text and the curated GT cell.
+    INSTRUCTOR_COLS = {"Instructor", "任课老师"}
+    CLASSTIME_COLS = {"Class Time", "上课时间"}
+    RESTRICTIONS_COLS = {"Course Selection Restrictions", "选课限制条件"}
+
+    def smart_compare(val1, val2, col=None):
+        """Smart compare two values, handle numeric and string types."""
+        # Restrictions: order-independent multiset compare; '无'/empty
+        # are both treated as "no restrictions".
+        if col in RESTRICTIONS_COLS:
+            return _restriction_tokens(val1) == _restriction_tokens(val2)
+
+        # Handle NaN for non-restriction columns
         if pd.isna(val1) and pd.isna(val2):
             return True
         if pd.isna(val1) or pd.isna(val2):
             return False
-        
-        # Try numeric comparison
+
+        # Try numeric comparison first
         try:
-            # Try to convert both values to floats
             num1 = float(str(val1).strip())
             num2 = float(str(val2).strip())
-            # Use small error comparison
             return abs(num1 - num2) < 1e-10
         except (ValueError, TypeError):
-            # If not a number, perform string comparison
-            str1 = normalize_str(str(val1).strip())
-            str2 = normalize_str(str(val2).strip())
-            return str1 == str2
+            pass
+
+        # Field-specific canonicalization before normalize_str equality.
+        s1, s2 = str(val1).strip(), str(val2).strip()
+        if col in INSTRUCTOR_COLS:
+            s1 = _strip_instructor_title(s1)
+            s2 = _strip_instructor_title(s2)
+        elif col in CLASSTIME_COLS:
+            s1 = _strip_classtime_weeks(s1)
+            s2 = _strip_classtime_weeks(s2)
+        return normalize_str(s1) == normalize_str(s2)
     
     def compare_single_files(gt_file_path, agent_file_path):
         """Compare a single groundtruth file and agent file"""
@@ -134,9 +222,16 @@ def check_local(agent_workspace: str, groundtruth_workspace: str, en_mode=True) 
             if len(gt_cleaned) != len(agent_cleaned):
                 return False, f"Data row count mismatch - GT: {len(gt_cleaned)} rows, Agent: {len(agent_cleaned)} rows"
             
-            # Compare the content after sorting
-            gt_sorted = gt_cleaned[common_cols].sort_values(by=common_cols).reset_index(drop=True)
-            agent_sorted = agent_cleaned[common_cols].sort_values(by=common_cols).reset_index(drop=True)
+            # Align rows by the Course ID key (deterministic across
+            # PDF-extraction variants).  Falls back to sorting on all
+            # common columns if neither key column is present.
+            sort_key = next((c for c in ("Course ID", "课程代码") if c in common_cols), None)
+            if sort_key:
+                gt_sorted = gt_cleaned[common_cols].sort_values(by=sort_key).reset_index(drop=True)
+                agent_sorted = agent_cleaned[common_cols].sort_values(by=sort_key).reset_index(drop=True)
+            else:
+                gt_sorted = gt_cleaned[common_cols].sort_values(by=common_cols).reset_index(drop=True)
+                agent_sorted = agent_cleaned[common_cols].sort_values(by=common_cols).reset_index(drop=True)
             
             # Compare the content of the specified columns row by row
             mismatches = []
@@ -145,7 +240,7 @@ def check_local(agent_workspace: str, groundtruth_workspace: str, en_mode=True) 
                     gt_val = gt_sorted.iloc[i][col]
                     agent_val = agent_sorted.iloc[i][col]
                     
-                    if not smart_compare(gt_val, agent_val):
+                    if not smart_compare(gt_val, agent_val, col=col):
                         mismatches.append({
                             'row': i + 1,
                             'column': col,
