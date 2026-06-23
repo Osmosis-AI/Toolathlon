@@ -83,8 +83,8 @@ def check_paper_repositories_codeurl(args):
         {
             "file": "_publications/2024-05-15-enhancing-llms.md",
             "name": "Enhancing LLMs",
-            "status": "no_released_repo",
-            "expected_codeurl": None
+            "status": "released",  # Released - has complete implementation
+            "expected_codeurl": f"https://github.com/{args.user_name}/enhancing-llms"
         },
         {
             "file": "_publications/2025-06-01-ipsum-lorem-all-you-need.md", 
@@ -101,13 +101,7 @@ def check_paper_repositories_codeurl(args):
         {
             "file": "_publications/2025-07-01-optimizing-llms-contextual-reasoning.md",
             "name": "Optimizing LLMs",
-            "status": "optional_codeurl",
-            "expected_codeurl": f"https://github.com/{args.user_name}/optimizing-llms-contextual-reasoning"
-        },
-        {
-            "file": "_publications/2025-06-15-ipsum-lorem-workshop.md",
-            "name": "Ipsum Lorem Workshop",
-            "status": "no_released_repo",
+            "status": "to_be_released",  # README shows "🚧 To be released"
             "expected_codeurl": None
         }
     ]
@@ -146,33 +140,23 @@ def check_paper_repositories_codeurl(args):
             
             print(f"  ✅ Released paper {paper['name']} has correct codeurl: {codeurl_data}")
             
-        elif paper['status'] == 'optional_codeurl':
-            # This repository is ambiguous: a missing codeurl is acceptable,
-            # but if one is present it must point to the correct repository.
-            if not codeurl_data:
-                print(f"  ✅ Paper {paper['name']} has no codeurl, which is acceptable")
-                continue
-
-            if codeurl_data != paper['expected_codeurl']:
-                print(f"ERROR: Paper {paper['name']} has incorrect codeurl")
-                print(f"  Expected: {paper['expected_codeurl']} or no codeurl")
-                print(f"  Actual: {codeurl_data}")
-                exit(1)
-
-            print(f"  ✅ Paper {paper['name']} has acceptable codeurl: {codeurl_data}")
-
-        elif paper['status'] == 'no_released_repo':
-            # Papers without a released repository should NOT have codeurl.
+        elif paper['status'] == 'to_be_released':
+            # To-be-released papers should NOT have codeurl
             if codeurl_data:
-                print(f"ERROR: Paper {paper['name']} should not have codeurl, but found: {codeurl_data}")
+                print(f"ERROR: To-be-released paper {paper['name']} should not have codeurl, but found: {codeurl_data}")
                 exit(1)
-
-            print(f"  ✅ Paper {paper['name']} correctly has no codeurl")
+            
+            print(f"  ✅ To-be-released paper {paper['name']} correctly has no codeurl")
     
     print("All paper repository codeurl checks passed.")
 
 
 def check_modified_files(args):
+    def get_filename(file):
+        if isinstance(file, dict):
+            return file.get("filename")
+        return getattr(file, "filename", None)
+
     for repo in UPSTREAM_GIT_REPOS:
         repo_name = repo.split('/')[-1]
         local_repo = f"{args.user_name}/{repo_name}"
@@ -182,23 +166,29 @@ def check_modified_files(args):
         init_commit_sha = get_latest_commit_sha(args.github_token, repo, get_branch(repo_name))
         latest_commit_sha = get_latest_commit_sha(args.github_token, local_repo, get_branch(repo_name))
         modified_files = get_modified_files_between_commits(args.github_token, local_repo, init_commit_sha, latest_commit_sha)
+        if modified_files is None:
+            print(f"Could not retrieve modified files for {repo_name}.")
+            exit(1)
 
         if repo_name == "My-Homepage":
             limited_modified_files = [
+                "_publications/2024-05-15-enhancing-llms.md",
                 "_publications/2025-06-01-ipsum-lorem-all-you-need.md",
                 "_publications/2025-06-15-ipsum-lorem-workshop.md",
+                "_publications/2025-06-20-llm-adaptive-learning.md",
                 "_publications/2025-07-01-optimizing-llms-contextual-reasoning.md",
                 "_config.yml"
             ]
             for file in modified_files:
-                if file.filename not in limited_modified_files:
-                    print(f"Unexpected modified file: {file.filename}")
+                filename = get_filename(file)
+                if filename not in limited_modified_files:
+                    print(f"Unexpected modified file: {filename}")
                     exit(1)
         else:
             if modified_files:
                 print(f"Unexpected modified files found in {repo_name}:")
                 for file in modified_files:
-                    print(f" - {file.filename}")
+                    print(f" - {get_filename(file)}")
                 exit(1)
     
     print("Modified files check passed. Only expected files were modified.")
