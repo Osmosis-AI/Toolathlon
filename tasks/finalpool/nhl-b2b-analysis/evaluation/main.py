@@ -15,6 +15,7 @@ if not os.path.exists(folder_id_file):
 with open(folder_id_file, "r") as f:
     folder_id = f.read().strip()
     
+spreadsheet_id = find_spreadsheet_in_folder(folder_id, NEEDED_SPREADSHEET_NAME)
 
 def main():
     """Main function, supports command line execution"""
@@ -29,7 +30,6 @@ def main():
     groundtruth_data = pd.read_csv(os.path.join(args.groundtruth_workspace, "standard_answer.csv"))
 
     def _check():
-        spreadsheet_id = find_spreadsheet_in_folder(folder_id, NEEDED_SPREADSHEET_NAME)
         agent_data = fetch_google_sheet_data_gspread(spreadsheet_id)
 
         # we first check the headers are the same
