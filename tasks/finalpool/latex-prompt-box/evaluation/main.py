@@ -70,7 +70,7 @@ def read_file(file_path: str) -> str:
         return file.read()
 
 GT_SIMPLE_PROMPT = r"Question:\\\{input\}\\Answer:\\Let's think step by step."
-GT_COMPLEX_PROMPT = r"<|im\_start|>system\\You are a helpful assistant.<|im\_end|>\\<|im\_start|>user\\\{input\}\\Please reason step by step, and put your final answer within \textbackslash\textbackslash boxed\{\}.\\<|im\_end|>\\<|im\_start|>assistant"
+GT_COMPLEX_PROMPT = r"<|im\_start|>system\\You are a helpful assistant.<|im\_end|>\\<|im\_start|>user\\\{input\}\\Please reason step by step, and put your final answer within \textbackslash boxed\{\}.\\<|im\_end|>\\<|im\_start|>assistant"
 
 
 def _normalize_text_commands(s: str) -> str:
