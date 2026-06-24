@@ -44,7 +44,9 @@ def run_complete_evaluation(agent_workspace: str, groundtruth_workspace: str, re
         return all_ok, (None if all_ok else "see per-subcheck details below")
 
     try:
-        grade_with_retry(_l2_check)
+        retry_ok, retry_msg = grade_with_retry(_l2_check)
+        if not retry_ok and not last_sub:
+            results.append(("Remote Services", False, retry_msg or "remote services check failed"))
     except Exception as e:
         # Dispatcher itself raised (rare — every internal subcheck is
         # already try/excepted).  Surface as its own row so the rest of
