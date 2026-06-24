@@ -1,17 +1,39 @@
 from argparse import ArgumentParser
 import os
+from pathlib import Path
 import json
 import subprocess
 import re
+import time
 from datetime import datetime
 from typing import Dict, List, Tuple, Any
 
 from utils.general.helper import normalize_str, read_json, print_color
 from utils.app_specific.poste.ops import find_emails_from_sender, mailbox_has_email_matching_body
-from utils.evaluation.retry import grade_with_retry
+from utils.evaluation.retry import DEFAULT_MAX_ATTEMPTS, DEFAULT_POLL_S, grade_with_retry
 
 
 VERBOSE = False
+
+
+def get_instance_suffix() -> str:
+    try:
+        import yaml
+    except ImportError:
+        return ""
+    for root in [Path.cwd(), *Path(__file__).resolve().parents]:
+        config_path = root / "configs" / "ports_config.yaml"
+        if config_path.exists():
+            try:
+                with open(config_path, "r") as f:
+                    return (yaml.safe_load(f) or {}).get("instance_suffix", "")
+            except Exception:
+                return ""
+    return ""
+
+
+def kubeconfig_filename(cluster_name: str) -> str:
+    return f"{cluster_name}{get_instance_suffix()}-config.yaml"
 
 
 def debug(msg: str) -> None:
@@ -35,27 +57,10 @@ def run_cmd(cmd: List[str], suppress_error_log: bool = False) -> Tuple[int, str,
         return 1, "", str(e)
 
 
-def _instance_suffix(task_dir: str) -> str:
-    """Read instance_suffix from configs/ports_config.yaml so the kubeconfig
-    filename matches what the preprocess shell script wrote.  See the
-    matching helper in token_key_session.py for the full rationale."""
-    cfg_path = os.path.join(task_dir, "..", "..", "..", "configs", "ports_config.yaml")
-    try:
-        with open(cfg_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith("instance_suffix:"):
-                    val = line.split(":", 1)[1].strip()
-                    return val.strip('"').strip("'")
-    except OSError:
-        pass
-    return ""
-
-
 def detect_kubeconfig(agent_workspace: str, task_dir: str) -> str:
-    fname = f"cluster-cleanup{_instance_suffix(task_dir)}-config.yaml"
-    cand1 = os.path.join(task_dir, "k8s_configs", fname)
-    cand2 = os.path.join(agent_workspace, "k8s_configs", fname)
+    filename = kubeconfig_filename("cluster-cleanup")
+    cand1 = os.path.join(task_dir, "k8s_configs", filename)
+    cand2 = os.path.join(agent_workspace, "k8s_configs", filename)
     debug(f"Trying kubeconfig candidates: {cand1} | {cand2}")
     if os.path.exists(cand1):
         debug(f"Using kubeconfig: {cand1}")
@@ -587,7 +592,12 @@ def main() -> int:
     # 2.2 Every shouldnt_receive must NOT have emails from sender
     for recv_email, cfg in shouldnt_receive_emails.items():
         imap_cfg = {"email": recv_email, **cfg}
-        emails = find_emails_from_sender(imap_cfg, sender_query_for_imap, folder="INBOX", fetch_limit=200)
+        emails = []
+        for attempt in range(1, DEFAULT_MAX_ATTEMPTS + 1):
+            emails = find_emails_from_sender(imap_cfg, sender_query_for_imap, folder="INBOX", fetch_limit=200)
+            if emails or attempt >= DEFAULT_MAX_ATTEMPTS:
+                break
+            time.sleep(DEFAULT_POLL_S)
         none_found = len(emails) == 0
         email_details["shouldnt_receive"][recv_email] = {
             "none_found": none_found,
