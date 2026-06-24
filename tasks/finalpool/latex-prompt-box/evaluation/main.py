@@ -68,8 +68,15 @@ def read_file(file_path: str) -> str:
         return file.read()
 
 GT_SIMPLE_PROMPT = r"Question:\\\{input\}\\Answer:\\Let's think step by step."
-GT_COMPLEX_PROMPT = r"<|im\_start|>system\\You are a helpful assistant.<|im\_end|>\\<|im\_start|>user\\\{input\}\\Please reason step by step, and put your final answer within \textbackslash\textbackslash boxed\{\}.\\<|im\_end|>\\<|im\_start|>assistant"
-GT_MAPPING = {"Simple Prompt": re.sub(r'\s+', '', GT_SIMPLE_PROMPT), "Complex Prompt": re.sub(r'\s+', '', GT_COMPLEX_PROMPT)}
+GT_COMPLEX_PROMPT = r"<|im\_start|>system\\You are a helpful assistant.<|im\_end|>\\<|im\_start|>user\\\{input\}\\Please reason step by step, and put your final answer within \textbackslash boxed\{\}.\\<|im\_end|>\\<|im\_start|>assistant"
+GT_COMPLEX_PROMPT_DOUBLE_BACKSLASH = r"<|im\_start|>system\\You are a helpful assistant.<|im\_end|>\\<|im\_start|>user\\\{input\}\\Please reason step by step, and put your final answer within \textbackslash\textbackslash boxed\{\}.\\<|im\_end|>\\<|im\_start|>assistant"
+GT_MAPPING = {
+    "Simple Prompt": (re.sub(r'\s+', '', GT_SIMPLE_PROMPT),),
+    "Complex Prompt": (
+        re.sub(r'\s+', '', GT_COMPLEX_PROMPT),
+        re.sub(r'\s+', '', GT_COMPLEX_PROMPT_DOUBLE_BACKSLASH),
+    ),
+}
 
 def main():
     parser = ArgumentParser()
@@ -116,7 +123,7 @@ def main():
         return False
     needed_appendix_text_content = appendix_text_content.split(r"\section{Model Prompt}")[-1]
 
-    for title, gt in GT_MAPPING.items():
+    for title, accepted_gts in GT_MAPPING.items():
         content = find_desired_tcolorbox_remove_blanks(needed_appendix_text_content, title)
         if content is None:
             print(f"Not found desired tcolorbox in {title}")
@@ -127,9 +134,9 @@ def main():
         # print(gt)
         # check if the filled_content startswith gt
         normalized_filled = _normalize_text_commands(filled_content.strip())
-        normalized_gt = _normalize_text_commands(gt.strip())
-        if not normalized_filled.startswith(normalized_gt):
-            print(f"Filled content does not start with {gt}")
+        normalized_gts = [_normalize_text_commands(gt.strip()) for gt in accepted_gts]
+        if not any(normalized_filled.startswith(normalized_gt) for normalized_gt in normalized_gts):
+            print(f"Filled content does not start with any accepted {title} prompt")
             founddesiredtcolorbox_dict[title] = False
             break
         founddesiredtcolorbox_dict[title]= True
