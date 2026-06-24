@@ -263,6 +263,14 @@ START_CONTAINER_ARGS+=(
     "-v" "$PROJECT_ROOT/configs/.mcp-auth:/workspace/configs/.mcp-auth"
 )
 
+# Overlay the pinned Notion MCP's restrictive OpenAPI schema at runtime.
+NOTION_OPENAPI_PATCH="$PROJECT_ROOT/configs/notion-mcp-patches/notion-openapi.json"
+if [ -f "$NOTION_OPENAPI_PATCH" ]; then
+    START_CONTAINER_ARGS+=(
+        "-v" "$NOTION_OPENAPI_PATCH:/workspace/node_modules/@notionhq/notion-mcp-server/scripts/notion-openapi.json:ro"
+    )
+fi
+
 START_CONTAINER_ARGS+=(
     # Mount output folder as /workspace/dumps
     "-v" "$output_folder:/workspace/dumps"
