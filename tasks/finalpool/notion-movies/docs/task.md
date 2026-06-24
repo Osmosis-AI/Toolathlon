@@ -16,4 +16,4 @@ You are a professional notion page update assistant. You need to update a notion
    - Director
    - Status (Watched)
 
-3. Search the Official trailer YouTube link of "Star Wars: Episode III - Revenge of the Sith" and add it to its subpage. When adding the video link, please refer to the format used by existing movie subpages.
+3. Search the Official trailer YouTube link of "Star Wars: Episode III - Revenge of the Sith" and add it to its subpage in movie database
