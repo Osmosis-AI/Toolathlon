@@ -100,12 +100,9 @@ def fetch_sheet_data_from_file(sheets_service, file_id: str) -> List[List[Any]]:
         return values
         
     except Exception as e:
-        # Raise instead of exit() so the surrounding grade_with_retry can
-        # actually retry on transient Google Sheets failures (propagation
-        # lag, 5xx).  exit() called os._exit-style termination here,
-        # short-circuiting the retry budget that wraps the outer
-        # _check_all_sheets call.
         raise RuntimeError(f"Failed to get data from file {file_id}: {e}") from e
+    
+    return []
 
 
 def normalize_cell_value(value: Any) -> str:
