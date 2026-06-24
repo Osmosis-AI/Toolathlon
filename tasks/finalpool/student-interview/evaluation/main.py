@@ -86,13 +86,24 @@ def validate_interview_time(interview, tomorrow_date, the_day_after_tomorrow_dat
         issues.append(f"❌ {student}: Interview duration {duration_minutes:.0f} minutes < 90 minutes")
         return False, issues
     
-    # Check 3: Working hours (8:00-17:00)
-    start_hour = event_start_dt.hour
-    end_hour = event_end_dt.hour
-    end_minute = event_end_dt.minute
-    
+    # Check 3: Working hours (8:00-17:00 LOCAL Beijing/HK time, +08:00).
+    # Google Calendar API normalises returned dateTimes to UTC, so
+    # ``event_start_dt.hour`` is the UTC hour — not what we want for
+    # this task whose working window is defined in +08:00 (see the
+    # ``timeMin``/``timeMax`` filter elsewhere in this file).  Convert
+    # to a +08:00 view before reading .hour, otherwise an agent that
+    # correctly scheduled 09:00 Beijing time would be incorrectly
+    # rejected as "01:00 UTC not within working hours".
+    from datetime import timezone, timedelta
+    LOCAL_TZ = timezone(timedelta(hours=8))
+    local_start = event_start_dt.astimezone(LOCAL_TZ) if event_start_dt.tzinfo else event_start_dt
+    local_end = event_end_dt.astimezone(LOCAL_TZ) if event_end_dt.tzinfo else event_end_dt
+    start_hour = local_start.hour
+    end_hour = local_end.hour
+    end_minute = local_end.minute
+
     if start_hour < 8 or end_hour > 17 or (end_hour == 17 and end_minute > 0):
-        issues.append(f"❌ {student}: Interview time {event_start_dt.strftime('%H:%M')}-{event_end_dt.strftime('%H:%M')} not within working hours (8:00-17:00)")
+        issues.append(f"❌ {student}: Interview time {local_start.strftime('%H:%M')}-{local_end.strftime('%H:%M')} not within working hours (8:00-17:00)")
         return False, issues
     
     # Check 4: No conflicts with existing meetings
