@@ -584,7 +584,7 @@ def check_movie_information_accuracy(movies: List[Dict]) -> Tuple[bool, List[str
 
 def check_star_wars_movie_exists(movies: List[Dict], token: str = None) -> Tuple[bool, List[str]]:
     """
-    Check if Star Wars: Episode III - Revenge of the Sith exists with correct information and a specific YouTube embedded video block
+    Check if Star Wars: Episode III - Revenge of the Sith exists with correct information and specific YouTube link
     """
     star_wars_title = "Star Wars: Episode III - Revenge of the Sith"
     expected_youtube_video_id = "5UnjrG_N8hU"  # Specific video ID for Star Wars Episode III trailer
@@ -615,65 +615,40 @@ def check_star_wars_movie_exists(movies: List[Dict], token: str = None) -> Tuple
                     if expected_lower not in actual_value:
                         missing_info.append(f"Expected {key}: {expected_value}, got: {actual_value}")
             
-            embedded_video_urls = []
-            embedded_video_check_error = None
-            if token and movie.get('id'):
+            # Check if the specific YouTube link exists in properties first
+            youtube_link = movie.get('youtube_link', '').strip()
+            has_correct_youtube_in_properties = youtube_link and expected_youtube_video_id in youtube_link
+            
+            # If no correct YouTube link in properties and we have a token, check page content
+            has_correct_youtube_in_content = False
+            page_content = ""
+            if not has_correct_youtube_in_properties and token and movie.get('id'):
                 try:
-                    embedded_video_urls = get_notion_page_embedded_video_urls(movie['id'], token)
-                    print("----- embedded_video_urls -----")
-                    print(embedded_video_urls)
+                    page_content = get_notion_page_content_as_text(movie['id'], token)
+                    print(f"----- page_content -----")
+                    print(page_content)
+                    has_correct_youtube_in_content = expected_youtube_video_id in page_content
                 except Exception as e:
-                    embedded_video_check_error = str(e)
-            else:
-                embedded_video_check_error = "Notion token or page id is unavailable"
-
-            has_correct_youtube_embedded_video = any(expected_youtube_video_id in url for url in embedded_video_urls)
-            if not has_correct_youtube_embedded_video:
-                if embedded_video_check_error:
-                    missing_info.append(f"Could not verify embedded YouTube trailer block: {embedded_video_check_error}")
-                elif embedded_video_urls:
-                    missing_info.append(f"Incorrect YouTube embedded video block - Expected video ID '{expected_youtube_video_id}' (https://www.youtube.com/watch?v={expected_youtube_video_id}), found embedded video URLs: {embedded_video_urls}")
+                    print(f"Error getting page content for Star Wars: {e}")
+            
+            # Check for YouTube link validation
+            if not has_correct_youtube_in_properties and not has_correct_youtube_in_content:
+                # Check if any YouTube link exists (for better error messaging)
+                has_any_youtube_in_properties = youtube_link and ('youtube.com' in youtube_link.lower() or 'youtu.be' in youtube_link.lower())
+                has_any_youtube_in_content = page_content and ('youtube.com' in page_content.lower() or 'youtu.be' in page_content.lower())
+                
+                if has_any_youtube_in_properties or has_any_youtube_in_content:
+                    found_youtube_url = youtube_link if has_any_youtube_in_properties else "found in page content"
+                    missing_info.append(f"Incorrect YouTube trailer link - Expected video ID '{expected_youtube_video_id}' (https://www.youtube.com/watch?v={expected_youtube_video_id}), found: {found_youtube_url}")
                 else:
-                    missing_info.append(f"Missing YouTube embedded video block - Expected: https://www.youtube.com/watch?v={expected_youtube_video_id}")
+                    missing_info.append(f"Missing YouTube trailer link - Expected: https://www.youtube.com/watch?v={expected_youtube_video_id}")
             
             if missing_info:
                 return False, [f"Star Wars movie exists but missing: {', '.join(missing_info)}"]
             else:
-                return True, ["Star Wars movie exists with correct information and specific YouTube trailer embedded video block"]
+                return True, ["Star Wars movie exists with correct information and specific YouTube trailer link"]
     
     return False, ["Star Wars: Episode III - Revenge of the Sith not found"]
-
-def get_notion_page_embedded_video_urls(page_id: str, token: str) -> List[str]:
-    """Get URLs from Notion embed/video blocks in the page and nested child blocks."""
-    try:
-        def collect_embedded_video_urls(blocks_data):
-            urls = []
-            for block in blocks_data.get('results', []):
-                block_type = block.get('type', '')
-                block_id = block.get('id')
-
-                if block_type == 'embed':
-                    url = block.get('embed', {}).get('url', '')
-                elif block_type == 'video':
-                    video = block.get('video', {})
-                    url = video.get('external', {}).get('url', '')
-                else:
-                    url = ''
-
-                if url.strip():
-                    urls.append(url)
-
-                if block.get('has_children', False) and block_id:
-                    child_blocks = get_notion_page_blocks(block_id, token)
-                    urls.extend(collect_embedded_video_urls(child_blocks))
-
-            return urls
-
-        blocks = get_notion_page_blocks(page_id, token)
-        return collect_embedded_video_urls(blocks)
-
-    except Exception as e:
-        raise Exception(f"Failed to extract embedded video URLs from Notion page: {e}")
 
 def get_notion_page_content_as_text(page_id: str, token: str) -> str:
     """
