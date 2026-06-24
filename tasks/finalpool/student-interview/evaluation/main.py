@@ -4,7 +4,20 @@ import asyncio
 from pathlib import Path
 from utils.mcp.tool_servers import MCPServerManager, call_tool_with_retry, ToolCallError
 import json
-from datetime import datetime, timedelta, time
+from datetime import datetime, timedelta, time, timezone
+
+# Task working timezone.  The students and interviewers in this task
+# are situated in +08:00 (Beijing/Hong Kong): the calendar query
+# filter elsewhere in this file uses ``timeMin/timeMax = ...+08:00``,
+# the fixed pre-existing events (Academic Committee Meeting, PhD
+# Dissertation Defense) are declared with ``+08:00`` offsets, and the
+# hardcoded ``conflicts`` table below interprets its ``(start_hour,
+# end_hour)`` tuples as +08:00 hours.  The working-hours check
+# below converts each candidate interview event into this same frame
+# so a correctly-scheduled 09:00 +08:00 event isn't mis-read as 01:00
+# UTC (which would happen if we relied on whatever timezone Google
+# Calendar's API normalised the returned dateTime to).
+TASK_TZ = timezone(timedelta(hours=8))
 
 def parse_iso_time(iso_string):
     """
@@ -86,18 +99,13 @@ def validate_interview_time(interview, tomorrow_date, the_day_after_tomorrow_dat
         issues.append(f"❌ {student}: Interview duration {duration_minutes:.0f} minutes < 90 minutes")
         return False, issues
     
-    # Check 3: Working hours (8:00-17:00 LOCAL Beijing/HK time, +08:00).
-    # Google Calendar API normalises returned dateTimes to UTC, so
-    # ``event_start_dt.hour`` is the UTC hour — not what we want for
-    # this task whose working window is defined in +08:00 (see the
-    # ``timeMin``/``timeMax`` filter elsewhere in this file).  Convert
-    # to a +08:00 view before reading .hour, otherwise an agent that
-    # correctly scheduled 09:00 Beijing time would be incorrectly
-    # rejected as "01:00 UTC not within working hours".
-    from datetime import timezone, timedelta
-    LOCAL_TZ = timezone(timedelta(hours=8))
-    local_start = event_start_dt.astimezone(LOCAL_TZ) if event_start_dt.tzinfo else event_start_dt
-    local_end = event_end_dt.astimezone(LOCAL_TZ) if event_end_dt.tzinfo else event_end_dt
+    # Check 3: Working hours (8:00-17:00 in the task's TZ — see TASK_TZ
+    # at the top of the file).  Convert the event's datetime to TASK_TZ
+    # before reading ``.hour``, otherwise we'd be reading whatever
+    # timezone Google Calendar's API normalised the dateTime to
+    # (typically UTC), which doesn't reflect the local working window.
+    local_start = event_start_dt.astimezone(TASK_TZ) if event_start_dt.tzinfo else event_start_dt
+    local_end = event_end_dt.astimezone(TASK_TZ) if event_end_dt.tzinfo else event_end_dt
     start_hour = local_start.hour
     end_hour = local_end.hour
     end_minute = local_end.minute
