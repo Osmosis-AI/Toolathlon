@@ -85,6 +85,9 @@ def check_local(agent_workspace, groundtruth_workspace):
             # which doesn't appear in any official CMU source.
             "Ielts_min_score":7,
             "Application_fee":100,
+            # gt_record.md states "Final Deadline: Dec. 10, 2025" — keep
+            # the day in sync with the curated record.  ``except_year=True``
+            # in compare_iso_time below means the year here is informational.
             "Application_ddl":"2025-12-10T15:00:00-05:00"},
         {"University":['californiaberkeley','ucb'],
             "City":"Berkeley",
