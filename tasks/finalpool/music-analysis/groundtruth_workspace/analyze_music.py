@@ -118,6 +118,7 @@ def process_year_data(xl_file, year):
 
     sheet_data = xl_file[str(year)]
     results = []
+    seen_song_rows = False
 
     for idx, row in sheet_data.iterrows():
         # Skip rows with no song name in the first column
@@ -130,8 +131,11 @@ def process_year_data(xl_file, year):
         # Pop Singles Chart" with NaN in col 1.  1941-1949 don't have such
         # title rows, so this check is a no-op for them.
         if pd.isna(row.iloc[1]) or row.iloc[1] == '':
+            if seen_song_rows:
+                break
             continue
 
+        seen_song_rows = True
         song_performance = analyze_song_performance(row)
         
         # Calculate consecutive weeks metrics

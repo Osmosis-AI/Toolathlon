@@ -5,12 +5,16 @@ try:
     import sys
     import pandas as pd
     import os
+    import re
     from pathlib import Path
 except Exception as e:
     print("import error: ", e)
     exit(1)
 
 print("import finished")
+
+def _normalize_string_cell(value):
+    return re.sub(r"\s+", " ", str(value).replace("\u00a0", " ")).strip()
 
 def compare_excel_files(agent_file, groundtruth_file):
     """Compare agent output with groundtruth Excel file, including all sheets"""
@@ -65,7 +69,7 @@ def compare_excel_files(agent_file, groundtruth_file):
                         # an agent that does any cleaning of the raw values
                         # would otherwise hit a deterministic false negative.
                         if isinstance(agent_val, str) or isinstance(gt_val, str):
-                            if str(agent_val).strip() != str(gt_val).strip():
+                            if _normalize_string_cell(agent_val) != _normalize_string_cell(gt_val):
                                 return False, f"Sheet {sheet_name}: Value mismatch at row {row_idx}, column '{col}'. Agent: {agent_val!r}, Groundtruth: {gt_val!r}"
                         elif agent_val != gt_val:
                             return False, f"Sheet {sheet_name}: Value mismatch at row {row_idx}, column '{col}'. Agent: {agent_val}, Groundtruth: {gt_val}"
