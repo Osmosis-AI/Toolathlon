@@ -45,7 +45,11 @@ def search_structured_log_payload(transaction_id="T8492XJ3", project_id="mcp-ben
     }
 
     # Build filter query for logs containing the transaction_id
-    filter_query = f'logName="projects/{project_id}/logs/{log_bucket_name}" AND NOT jsonPayload.logging\\.googleapis\\.com/diagnostic AND jsonPayload.transaction_id="{transaction_id}" OR textPayload:"{transaction_id}"'
+    filter_query = (
+        f'logName="projects/{project_id}/logs/{log_bucket_name}" '
+        f'AND NOT jsonPayload.logging\\.googleapis\\.com/diagnostic '
+        f'AND (jsonPayload.transaction_id="{transaction_id}" OR textPayload:"{transaction_id}")'
+    )
 
     # add time range filter
     default_timezone = datetime.now().astimezone().tzinfo
@@ -362,12 +366,25 @@ def validate_nested_content(groundtruth_data: dict, agent_data: dict, path: str 
                 if len(normalized_agent_value) < len(expected_value):
                     missing_items.append(f"List length mismatch at {current_path}: expected at least {len(expected_value)}, got {len(normalized_agent_value)}")
                 elif len(expected_value) > 0 and len(normalized_agent_value) > 0:
-                    if isinstance(expected_value[0], dict) and isinstance(normalized_agent_value[0], dict):
-                        missing_items.extend(validate_nested_content(expected_value[0], normalized_agent_value[0], f"{current_path}[0]"))
-                    elif isinstance(expected_value[0], dict):
-                        for i, expected_item in enumerate(expected_value):
-                            if i < len(normalized_agent_value) and isinstance(normalized_agent_value[i], dict):
-                                missing_items.extend(validate_nested_content(expected_item, normalized_agent_value[i], f"{current_path}[{i}]"))
+                    comparable_expected = expected_value
+                    comparable_agent = normalized_agent_value
+                    if (
+                        key == "related_transactions"
+                        and all(isinstance(item, dict) for item in expected_value)
+                        and all(isinstance(item, dict) for item in normalized_agent_value)
+                    ):
+                        comparable_expected = sorted(expected_value, key=lambda item: item.get("transaction_id", ""))
+                        comparable_agent = sorted(normalized_agent_value, key=lambda item: item.get("transaction_id", ""))
+
+                    if isinstance(comparable_expected[0], dict):
+                        for i, expected_item in enumerate(comparable_expected):
+                            if i >= len(comparable_agent):
+                                continue
+                            agent_item = comparable_agent[i]
+                            if not isinstance(agent_item, dict):
+                                missing_items.append(f"Type mismatch at {current_path}[{i}]: expected dict, got {type(agent_item).__name__}")
+                                continue
+                            missing_items.extend(validate_nested_content(expected_item, agent_item, f"{current_path}[{i}]"))
         
         # For basic types, check value for important fields
         else:
