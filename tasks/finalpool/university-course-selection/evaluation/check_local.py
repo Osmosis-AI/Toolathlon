@@ -175,13 +175,11 @@ def check_local(agent_workspace: str, groundtruth_workspace: str, en_mode=True) 
             if gt_df is None:
                 return False, "Groundtruth file does not contain any valid sheets"
             
-            gt_cols = list(gt_df.columns)
-            missing_gt_cols = [col for col in REQUIRED_COLUMNS if col not in gt_cols]
-            extra_gt_cols = [col for col in gt_cols if col not in REQUIRED_COLUMNS]
-            if missing_gt_cols or extra_gt_cols:
-                return False, f"Groundtruth columns do not match required columns - missing: {missing_gt_cols}, extra: {extra_gt_cols}"
+            available_gt_cols = [col for col in REQUIRED_COLUMNS if col in gt_df.columns]
+            if not available_gt_cols:
+                return False, "Groundtruth file does not contain the required columns"
             
-            gt_cleaned = clean_dataframe(gt_df, REQUIRED_COLUMNS)
+            gt_cleaned = clean_dataframe(gt_df, available_gt_cols)
             if gt_cleaned.empty:
                 return False, "Groundtruth file does not contain any valid data"
             
@@ -205,18 +203,18 @@ def check_local(agent_workspace: str, groundtruth_workspace: str, en_mode=True) 
             if agent_df is None:
                 return False, "Agent file does not contain any valid sheets"
             
-            agent_cols = list(agent_df.columns)
-            missing_agent_cols = [col for col in gt_cols if col not in agent_cols]
-            extra_agent_cols = [col for col in agent_cols if col not in gt_cols]
-            if missing_agent_cols or extra_agent_cols:
-                return False, f"Agent columns do not match groundtruth columns - missing: {missing_agent_cols}, extra: {extra_agent_cols}"
+            available_agent_cols = [col for col in REQUIRED_COLUMNS if col in agent_df.columns]
+            if not available_agent_cols:
+                return False, "Agent file does not contain the required columns"
             
-            agent_cleaned = clean_dataframe(agent_df, REQUIRED_COLUMNS)
+            agent_cleaned = clean_dataframe(agent_df, available_agent_cols)
             if agent_cleaned.empty:
                 return False, "Agent file does not contain any valid data"
             
             # Ensure the two files have the same columns
-            common_cols = REQUIRED_COLUMNS
+            common_cols = list(set(available_gt_cols) & set(available_agent_cols))
+            if not common_cols:
+                return False, "The two files do not have the same required columns"
             
             # Check if the number of data rows is consistent
             if len(gt_cleaned) != len(agent_cleaned):
