@@ -8,7 +8,45 @@ import os
 import json
 import pandas as pd
 
+import re
+
 from utils.general.helper import normalize_str
+
+
+def _proctor_tokens(raw):
+    """Lowercase, drop 'professor' / 'prof.' prefix, return the set of word tokens.
+
+    Whitespace and punctuation are word boundaries; we don't collapse them away
+    (unlike normalize_str), so 'Debra Flores' -> {'debra', 'flores'} and
+    'Professor Smith' -> {'smith'}.
+    """
+    if raw is None:
+        return set()
+    s = str(raw).strip().lower()
+    s = re.sub(r'\bprof(?:essor|\.)?\b', ' ', s)
+    return set(re.findall(r'\w+', s))
+
+
+def proctor_match(agent_val, ground_val):
+    """Compare proctor names.
+
+    Canvas exposes the full instructor name, so when GT carries the full
+    name the agent must too — short names lose information available on
+    the platform.  Rule: GT's tokens must all appear in the agent's tokens
+    (after stripping the 'Professor' honorific on either side).  This
+    means:
+      - GT 'Debra Flores' requires agent to contain both 'debra' AND 'flores'.
+        Agent 'Debra Flores' or 'Professor Debra Flores' passes; 'Debra' alone
+        fails.
+      - GT 'Smith' (single-token, used for 'Professor Smith' replacement cases)
+        requires only 'smith' — agent 'Smith' or 'Professor Smith' passes.
+    """
+    a = _proctor_tokens(agent_val)
+    g = _proctor_tokens(ground_val)
+    if not a or not g:
+        # Fall back to TBD-string equality if either side has no real tokens
+        return str(agent_val).strip().lower() == str(ground_val).strip().lower()
+    return g <= a
 
 def check_local(agent_workspace: str, groundtruth_workspace: str):
     """
@@ -79,16 +117,25 @@ def check_local(agent_workspace: str, groundtruth_workspace: str):
             for col in key_columns:
                 val_agent = row_agent.get(col, 'N/A')
                 val_ground = row_ground.get(col, 'N/A')
-                
+
                 # Normalize for consistent comparison
                 val_agent_norm = normalize_str(str(val_agent)) if pd.notna(val_agent) else 'TBD'
                 val_agent_norm = val_agent_norm.replace('professor', '')  # for cases like "professor smith"
                 val_ground_norm = normalize_str(str(val_ground)) if pd.notna(val_ground) else 'TBD'
-                
+
                 if col == 'Course Credit':
                     # Numeric compare
                     is_match = compare_numeric_values(val_agent_norm, val_ground_norm)
                     if not is_match:
+                        course_matches = False
+                        course_diffs.append(f"{col}: Agent='{val_agent_norm}' vs Ground='{val_ground_norm}'")
+                elif col == 'Proctor Name':
+                    # Token-subset compare: GT may carry full or short name; agent may
+                    # report either.  Accept 'Debra Flores' ~ 'Debra' and 'Professor
+                    # Smith' ~ 'Smith'.  Both TBD ('TBD' tokenizes to {'tbd'}) still match.
+                    agent_raw = 'TBD' if pd.isna(val_agent) else str(val_agent)
+                    ground_raw = 'TBD' if pd.isna(val_ground) else str(val_ground)
+                    if not proctor_match(agent_raw, ground_raw):
                         course_matches = False
                         course_diffs.append(f"{col}: Agent='{val_agent_norm}' vs Ground='{val_ground_norm}'")
                 elif col == 'Information Source(Announcement/Email/Message)' and row_ground['Course Code'] == 'NET101':
