@@ -737,9 +737,34 @@ def _compute_backtest(expected_rows: List[Dict]) -> Tuple[List[Dict], Dict[str, 
     total_return_mult = math.prod([1 + r for r in monthly_returns])
     total_return = total_return_mult - 1
     
-    # Annualized return
+    # Annualized return — the spec doesn't pin down which "N" goes in
+    # ``(1+total)^(12/N) - 1``:
+    #   * Convention A:  N = len(monthly_returns) = 12 (every list entry
+    #     counts as one observed monthly period; the first month's
+    #     zero-pad is treated as an observation of 0% return).  This is
+    #     what most quant libraries (empyrical, vectorbt) do.  Result
+    #     here: 12/12 = 1 → annualized = total.
+    #   * Convention B:  N = number of real return *observations* =
+    #     len(monthly_returns) - 1 = 11 (12 month-end snapshots produce
+    #     11 month-over-month transitions; the first zero-pad isn't a
+    #     real period).  This is the textbook framing.  Result here:
+    #     12/11 ≈ 1.0909 → annualized scaled up.
+    # Both readings are defensible; we expose BOTH and accept either at
+    # comparison time.
     num_months = len(monthly_returns)
-    annualized_return = (total_return_mult ** (12 / max(1, num_months)) - 1) if num_months > 0 else 0
+    if num_months > 0:
+        annualized_return = total_return_mult ** (12 / max(1, num_months)) - 1
+        # Convention B uses one fewer period (the zero-pad first month
+        # isn't a real observation).  Falls back to convention A when
+        # we only have one observation to avoid 12/0.
+        annualized_return_alt = (
+            total_return_mult ** (12 / max(1, num_months - 1)) - 1
+            if num_months > 1
+            else annualized_return
+        )
+    else:
+        annualized_return = 0.0
+        annualized_return_alt = 0.0
     
     # Sharpe ratio
     if len(monthly_returns) > 1:
@@ -777,6 +802,10 @@ def _compute_backtest(expected_rows: List[Dict]) -> Tuple[List[Dict], Dict[str, 
     metrics = {
         "total_return_pct": total_return * 100,
         "annualized_return_pct": annualized_return * 100,
+        # Alternate annualization (12/(N-1) convention) — accepted at
+        # comparison time alongside the primary value above.  See the
+        # comment block where ``annualized_return_alt`` is computed.
+        "annualized_return_pct_alt": annualized_return_alt * 100,
         "sharpe_ann": sharpe_annual,
         "win_rate_pct": win_rate,
         "max_drawdown_pct": max_drawdown_pct,
@@ -988,29 +1017,72 @@ async def async_main(args):
                     def r4(x):
                         return float(f"{float(x):.4f}")
 
+                    # Each entry: (name, agent_value, list-of-acceptable-expected-values, tolerance, sign_agnostic).
+                    # Annualized Return % carries TWO acceptable expected
+                    # values (12/N and 12/(N-1) annualization conventions)
+                    # — see ``_compute_backtest`` for the rationale.
                     cmp_pairs = [
-                        (exp_metrics.get("total_return_pct", 0.0),     bt_metrics_notion.get("total_return_pct", 0.0),     "Total Return %",      0.05, False),
-                        (exp_metrics.get("annualized_return_pct", 0.0), bt_metrics_notion.get("annualized_return_pct", 0.0), "Annualized Return %", 0.05, False),
-                        (exp_metrics.get("sharpe_ann", 0.0),            bt_metrics_notion.get("sharpe_ann", 0.0),            "Sharpe (ann.)",       0.05, False),
-                        (exp_metrics.get("win_rate_pct", 0.0),          bt_metrics_notion.get("win_rate_pct", 0.0),          "Win Rate %",          0.01, False),
+                        ("Total Return %",      bt_metrics_notion.get("total_return_pct", 0.0),
+                            [exp_metrics.get("total_return_pct", 0.0)],
+                            0.05, False),
+                        ("Annualized Return %", bt_metrics_notion.get("annualized_return_pct", 0.0),
+                            [exp_metrics.get("annualized_return_pct", 0.0),
+                             exp_metrics.get("annualized_return_pct_alt", exp_metrics.get("annualized_return_pct", 0.0))],
+                            0.05, False),
+                        ("Sharpe (ann.)",       bt_metrics_notion.get("sharpe_ann", 0.0),
+                            [exp_metrics.get("sharpe_ann", 0.0)],
+                            0.05, False),
+                        ("Win Rate %",          bt_metrics_notion.get("win_rate_pct", 0.0),
+                            [exp_metrics.get("win_rate_pct", 0.0)],
+                            0.01, False),
                         # Max Drawdown: compare absolute magnitudes — the sign convention (positive
                         # value vs. signed-negative loss) varies in financial reporting and is not
                         # specified in the task; tolerate either.
-                        (exp_metrics.get("max_drawdown_pct", 0.0),      bt_metrics_notion.get("max_drawdown_pct", 0.0),      "Max Drawdown %",      0.05, True),
+                        ("Max Drawdown %",      bt_metrics_notion.get("max_drawdown_pct", 0.0),
+                            [exp_metrics.get("max_drawdown_pct", 0.0)],
+                            0.05, True),
                     ]
-                    for ev, av, name, tolerance, sign_agnostic in cmp_pairs:
+                    for name, av, expected_alts, tolerance, sign_agnostic in cmp_pairs:
                         try:
-                            evf, avf = float(ev), float(av)
+                            avf = float(av)
                         except Exception:
-                            evf, avf = 0.0, 0.0
-                        if sign_agnostic:
-                            evf_cmp, avf_cmp = abs(evf), abs(avf)
+                            avf = 0.0
+                        # Dedup expected alternatives (when 12/N == 12/(N-1))
+                        seen = []
+                        for ev in expected_alts:
+                            try:
+                                evf = float(ev)
+                            except Exception:
+                                evf = 0.0
+                            if not any(abs(evf - s) < 1e-12 for s in seen):
+                                seen.append(evf)
+                        # Evaluate each alternative; pass if any matches.
+                        best_delta = None
+                        best_evf = seen[0]
+                        for evf in seen:
+                            if sign_agnostic:
+                                delta = abs(abs(evf) - abs(avf))
+                            else:
+                                delta = abs(evf - avf)
+                            if best_delta is None or delta < best_delta:
+                                best_delta = delta
+                                best_evf = evf
+                        if best_delta > tolerance:
+                            if len(seen) > 1:
+                                alts_str = " / ".join(f"{e:.4f}" for e in seen)
+                                errors.append(
+                                    f"Backtest metrics inconsistent: {name} expected one of [{alts_str}] actual {avf:.4f}"
+                                )
+                            else:
+                                errors.append(
+                                    f"Backtest metrics inconsistent: {name} expected {best_evf:.4f} actual {avf:.4f}"
+                                )
                         else:
-                            evf_cmp, avf_cmp = evf, avf
-                        if abs(evf_cmp - avf_cmp) > tolerance:
-                            errors.append(f"Backtest metrics inconsistent: {name} expected {evf:.4f} actual {avf:.4f}")
-                        else:
-                            print(f"  ✅ {name}: expected {evf:.4f} actual {avf:.4f} (Δ={abs(evf_cmp-avf_cmp):.4f} ≤ tol {tolerance})")
+                            if len(seen) > 1:
+                                alts_str = " / ".join(f"{e:.4f}" for e in seen)
+                                print(f"  ✅ {name}: expected one of [{alts_str}] actual {avf:.4f} (closest Δ={best_delta:.4f} ≤ tol {tolerance})")
+                            else:
+                                print(f"  ✅ {name}: expected {best_evf:.4f} actual {avf:.4f} (Δ={best_delta:.4f} ≤ tol {tolerance})")
 
                     # Compare period start/end & cost assumption
                     exp_period_start = expected_seq[0]["m"] if expected_seq else ""
