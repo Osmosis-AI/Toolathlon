@@ -56,7 +56,7 @@
       "location": "Building B Room 205",
       "announcement": {
         "title": "Final Exam Announcement - CS301",
-        "content": "Dear CS301 students,\n\nThis is to announce that the final exam proctor will be replaced by another teacher, Professor Smith, whose email is blacksmith@mcp.com.\n\nBest regards,\nCourse Instructor"
+        "content": "Dear CS301 students,\n\nThis is to announce that the final exam proctor will be replaced by another teacher, Black Smith, whose email is blacksmith@mcp.com.\n\nBest regards,\nCourse Instructor"
       },
       "students": [
         "rkelly27@mcp.com",
