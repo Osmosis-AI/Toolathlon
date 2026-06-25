@@ -3,10 +3,6 @@ import yaml
 import re
 from utils.general.helper import normalize_str
 
-SONG_ALIASES = {
-    "nothingonyou": ["nothinonyou"],
-}
-
 def load_songs_from_md(filename):
     """
     Read the YAML code block from a Markdown file and parse it into a Python object.
@@ -69,8 +65,12 @@ def check_content(agent_workspace: str, groundtruth_workspace: str):
     # Check if every GT song can be matched in agent output (GT is a subset of agent output)
     missing_songs = []
     for gt_song in gt_songs:
-        candidates = {gt_song, *SONG_ALIASES.get(gt_song, [])}
-        found = any(c in a for a in agent_songs for c in candidates)
+        found = False
+        for agent_song in agent_songs:
+            # Checks if the GT song name is a subset (substring) of any agent song name
+            if gt_song in agent_song:
+                found = True
+                break
         if not found:
             missing_songs.append(gt_song)
     
