@@ -190,7 +190,7 @@ def check_candidates_match_expected(candidates: List[Dict]) -> Tuple[bool, List[
             candidate.get('highest degree', '').strip().lower(),  # Convert to lowercase for comparison
             candidate.get('school', '').strip().lower() # Convert to lowercase for comparison
         ))
-    
+
     # Check each expected candidate
     for expected in expected_candidates:
         expected_tuple = (
