@@ -1,9 +1,10 @@
 from argparse import ArgumentParser
 import json
 import os
+import time
 from utils.app_specific.poste.ops import find_emails_from_sender, mailbox_has_email_matching_body, check_sender_outbox
 from utils.general.helper import print_color
-from utils.evaluation.retry import grade_with_retry
+from utils.evaluation.retry import DEFAULT_MAX_ATTEMPTS, DEFAULT_POLL_S, grade_with_retry
 
 USER_SECOND_REPLY_TIME = {
     "basic": 72,
@@ -42,6 +43,21 @@ def check_email_sent(config, sender, expected_body, expected_subject=None, email
         exit(1)
     else:
         print_color(f"✅ Found a {email_type} for {config['email']}", "green")
+
+
+def check_email_not_sent(config, sender, email_type="email"):
+    # Observe the full Layer-2 retry window before passing a negative email
+    # assertion; an unexpected message may appear after the first IMAP read.
+    for attempt in range(1, DEFAULT_MAX_ATTEMPTS + 1):
+        emails = find_emails_from_sender(config, sender, folder="INBOX")
+        if emails:
+            body = emails[0].get("body", "")[:100]
+            return False, f"Found unexpected {email_type} for {config['email']}: {body}..."
+
+        if attempt < DEFAULT_MAX_ATTEMPTS:
+            time.sleep(DEFAULT_POLL_S)
+
+    return True, f"No unexpected {email_type} for {config['email']}"
 
 if __name__=="__main__":
     parser = ArgumentParser()
@@ -116,14 +132,12 @@ if __name__=="__main__":
 
     for user in shouldnt_receive_users:
         config = all_email_configs[user]
-        # No Layer-2 retry here: "should be empty" cannot be helped by waiting longer.
-        emails = find_emails_from_sender(config, sender_email, folder="INBOX")
-        if emails:
-            print_color(f"❌ Found unexpected email for {user}", "red")
-            print_color(f"   Content: {emails[0].get('body', '')[:100]}...", "yellow")
+        ok, msg = check_email_not_sent(config, sender_email)
+        if not ok:
+            print_color(f"❌ {msg}", "red")
             exit(1)
         else:
-            print_color(f"✅ No unexpected email for {user}", "green")
+            print_color(f"✅ {msg}", "green")
 
 
     print_color("\n👔 Checking Manager Reminder Emails", "blue")
