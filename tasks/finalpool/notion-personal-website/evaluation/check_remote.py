@@ -1,5 +1,6 @@
 import os
 import sys
+import requests
 import argparse
 from typing import Dict, List, Optional, Any, Tuple
 import re
@@ -14,8 +15,7 @@ with open(allowed_page_id_file, "r") as f:
     allowed_page_ids = f.read()
 TARGET_PAGE_ID = allowed_page_ids
 
-from utils.app_specific.notion.ops import get_page_by_id, get_page_content_as_text
-
+from utils.app_specific.notion.ops import get_page_by_id,get_page_content_as_text
 
 def extract_text_from_notion_page(notion_page_content: str) -> Dict[str, str]:
     """Extract information from different sections - exactly matches original"""

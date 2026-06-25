@@ -30,7 +30,7 @@ When a decision here reverses an entry there, this file is the authoritative one
 | 5 | `[PR]` ✅ applied | `email-paper-homepage` | yes | yes | `docs/task.md`, `evaluation/main.py` | **Adopt PR per user decision (2026-06-25) — reverses the earlier reject `d170d91b`.** PR broadens the task scope from "newly-accepted papers only" to "all accepted/published papers": Enhancing LLMs now requires its codeurl, Optimizing LLMs becomes `to_be_released` (no codeurl), the Workshop check is dropped, and the allowed-modify file set expands. Now aligned to PR. |
 | 6 | `[PR]` ✅ applied | `k8s-mysql` | yes | yes | `groundtruth_workspace/gtq2.csv` | **Adopt PR per user decision (2026-06-25).** Trailing-newline-only difference — driver_id data (through 789) is row-identical; grader reads via `csv.DictReader` which ignores the trailing newline, so no behavioral change. Now aligned to PR. |
 | 7 | `[PR]` ✅ applied | `notion-hr` | yes | yes | `evaluation/main.py` | **Adopt PR per user decision (2026-06-25).** Whitespace-only difference (trailing whitespace on a blank line + final newline); the degree/school case-insensitive comparison (our `f9eaf3b8`) is present in both. No behavioral change. Now aligned to PR. |
-| 8 | `[OURS]` | `notion-personal-website` | yes | yes | `evaluation/check_remote.py` | Our verified fix `a1c9c087` (shared helper / pagination). |
+| 8 | `[PR]` ✅ applied | `notion-personal-website` | yes | yes | `evaluation/check_remote.py` | **Adopt PR per user decision (2026-06-25).** Only difference is a dead/unused `import requests` (used in neither version) + whitespace; our pagination/shared-helper changes (`a1c9c087`/`6352a6dd`) are present in both. Equivalent (ours was marginally cleaner without the dead import). Now aligned to PR. |
 | 9 | `[OURS]` | `student-interview` | yes | yes | `evaluation/main.py` | Our verified fix `36bb920d` (conflict message formatting / timezone). |
 | 10 | `[OURS]` | `woocommerce-product-recall` | yes | no | `evaluation/check_remote_recall.py`, `initial_workspace/recall_form_template.json` | Our change `943be37d` (align recall form with Google Forms MCP limits). PR did not touch this task — difference is entirely ours. |
 | 11 | `[REJECT]` | `detect-revised-terms` | no | yes | `docs/task.md`, `evaluation/check_content.py`, `groundtruth_workspace/revised_terms.csv` | Rejected (`UpdateLogs` `d8973618` + rows 77/119/151): PR would loosen the clarified "quoted original text + complete new-law provisions + one-to-many separate rows" requirement and roll back the exact-normalized GT. |
@@ -40,8 +40,8 @@ When a decision here reverses an entry there, this file is the authoritative one
 
 ## Summary
 
-- **7** adopt PR (`imagenet`, `sync-todo-to-readme`, `email-paper-homepage`, `canvas-arrange-exam`, `canvas-do-quiz`, `k8s-mysql`, `notion-hr`) — applied 2026-06-25, now aligned to PR.
-- **3** keep ours (own verified fix differs from PR).
+- **8** adopt PR (`imagenet`, `sync-todo-to-readme`, `email-paper-homepage`, `canvas-arrange-exam`, `canvas-do-quiz`, `k8s-mysql`, `notion-hr`, `notion-personal-website`) — applied 2026-06-25, now aligned to PR.
+- **2** keep ours (own verified fix differs from PR).
 - **4** reject PR (keep pre-PR version on purpose).
-- After the 7 adoptions, **7** tasks under `tasks/` still differ from PR (all intentional).
+- After the 8 adoptions, **6** tasks under `tasks/` still differ from PR (all intentional).
 - Non-task files that also differ (out of scope here): `UpdateLogs_CommonIssues.md`, `scripts/run_single_containerized.sh`, `scripts/run_single_decoupled.sh`, `utils/app_specific/notion/ops.py`.
