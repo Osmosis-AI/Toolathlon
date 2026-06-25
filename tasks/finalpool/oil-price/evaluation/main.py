@@ -766,9 +766,20 @@ def _compute_backtest(expected_rows: List[Dict]) -> Tuple[List[Dict], Dict[str, 
     total_return_mult = math.prod([1 + r for r in monthly_returns])
     total_return = total_return_mult - 1
     
-    # Annualized return
+    # Annualized return. The task leaves a small convention ambiguity here:
+    # N can be the 12 monthly portfolio-return slots, or the 11 real
+    # month-over-month transitions implied by 12 month-end snapshots.
     num_months = len(monthly_returns)
-    annualized_return = (total_return_mult ** (12 / max(1, num_months)) - 1) if num_months > 0 else 0
+    if num_months > 0:
+        annualized_return = total_return_mult ** (12 / max(1, num_months)) - 1
+        annualized_return_alt = (
+            total_return_mult ** (12 / max(1, num_months - 1)) - 1
+            if num_months > 1
+            else annualized_return
+        )
+    else:
+        annualized_return = 0
+        annualized_return_alt = 0
     
     # Sharpe ratio
     if len(monthly_returns) > 1:
@@ -806,6 +817,7 @@ def _compute_backtest(expected_rows: List[Dict]) -> Tuple[List[Dict], Dict[str, 
     metrics = {
         "total_return_pct": total_return * 100,
         "annualized_return_pct": annualized_return * 100,
+        "annualized_return_pct_alt": annualized_return_alt * 100,
         "sharpe_ann": sharpe_annual,
         "win_rate_pct": win_rate,
         "max_drawdown_pct": max_drawdown_pct,
@@ -1026,13 +1038,43 @@ async def async_main(args):
                     ]
                     for ev, av, name, tolerance in cmp_pairs:
                         try:
-                            evf, avf = float(ev), float(av)
+                            avf = float(av)
                         except Exception:
-                            evf, avf = 0.0, 0.0
-                        if abs(evf - avf) > tolerance:
-                            errors.append(f"Backtest metrics inconsistent: {name} expected {evf:.4f} actual {avf:.4f}")
+                            avf = 0.0
+
+                        expected_values = [ev]
+                        if name == "Annualized Return %":
+                            expected_values.append(exp_metrics.get("annualized_return_pct_alt", ev))
+
+                        expected_floats = []
+                        for expected_value in expected_values:
+                            try:
+                                evf = float(expected_value)
+                            except Exception:
+                                evf = 0.0
+                            if not any(abs(evf - seen) < 1e-12 for seen in expected_floats):
+                                expected_floats.append(evf)
+
+                        best_evf = expected_floats[0]
+                        best_delta = abs(best_evf - avf)
+                        for evf in expected_floats[1:]:
+                            delta = abs(evf - avf)
+                            if delta < best_delta:
+                                best_evf = evf
+                                best_delta = delta
+
+                        if best_delta > tolerance:
+                            if len(expected_floats) > 1:
+                                alts = " / ".join(f"{value:.4f}" for value in expected_floats)
+                                errors.append(f"Backtest metrics inconsistent: {name} expected one of [{alts}] actual {avf:.4f}")
+                            else:
+                                errors.append(f"Backtest metrics inconsistent: {name} expected {best_evf:.4f} actual {avf:.4f}")
                         else:
-                            print(f"  ✅ {name}: expected {evf:.4f} actual {avf:.4f} (Δ={abs(evf-avf):.4f} ≤ tol {tolerance})")
+                            if len(expected_floats) > 1:
+                                alts = " / ".join(f"{value:.4f}" for value in expected_floats)
+                                print(f"  ✅ {name}: expected one of [{alts}] actual {avf:.4f} (closest Δ={best_delta:.4f} ≤ tol {tolerance})")
+                            else:
+                                print(f"  ✅ {name}: expected {best_evf:.4f} actual {avf:.4f} (Δ={best_delta:.4f} ≤ tol {tolerance})")
 
                     # Compare period start/end & cost assumption
                     exp_period_start = expected_seq[0]["m"] if expected_seq else ""
