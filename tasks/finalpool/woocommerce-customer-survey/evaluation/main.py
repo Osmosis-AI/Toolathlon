@@ -578,7 +578,7 @@ def validate_form_content(form_info: Dict) -> Tuple[bool, str]:
             },
             {
                 "keywords": ["delivery", "service", "satisfied"],
-                "question_text": "Are you satisfied with the delivery service?",
+                "question_text": "Are you satisfied with our delivery service?",
                 "type": "choice",
                 "required": True, 
                 "options_count": 5,
