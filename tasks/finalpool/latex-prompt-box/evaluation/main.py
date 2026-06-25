@@ -68,14 +68,33 @@ def read_file(file_path: str) -> str:
         return file.read()
 
 GT_SIMPLE_PROMPT = r"Question:\\\{input\}\\Answer:\\Let's think step by step."
-GT_COMPLEX_PROMPT = r"<|im\_start|>system\\You are a helpful assistant.<|im\_end|>\\<|im\_start|>user\\\{input\}\\Please reason step by step, and put your final answer within \textbackslash boxed\{\}.\\<|im\_end|>\\<|im\_start|>assistant"
-GT_COMPLEX_PROMPT_DOUBLE_BACKSLASH = r"<|im\_start|>system\\You are a helpful assistant.<|im\_end|>\\<|im\_start|>user\\\{input\}\\Please reason step by step, and put your final answer within \textbackslash\textbackslash boxed\{\}.\\<|im\_end|>\\<|im\_start|>assistant"
+# Two acceptable renderings of `\boxed{}` inside the qwen-boxed Complex
+# Prompt — this is a LaTeX display escape ambiguity:
+#   * One `\textbackslash` matches the runtime prompt verbatim (the
+#     Python literal `\\boxed{{}}` resolves to `\boxed{}` at runtime,
+#     which renders as a single `\` before `boxed`).
+#   * Two `\textbackslash` is the historical reference reading from
+#     the .py source text, where `\\` was taken as two literal
+#     backslashes to display.
+# Both are common in M-STaR-style boxes; we accept either prefix.
+# Note: the qwen-boxed runtime template has NO newline between
+# ``\boxed{}.`` and ``<|im_end|>`` (they sit on the same line in the
+# Python source after escape resolution).  Per the task's "use \\ for
+# new lines" rule, the LaTeX rendering therefore has no \\ between them
+# either — \\ only appears at runtime-newline positions.  Earlier GT
+# strings had a stray \\ between ``\boxed\{\}.`` and ``<|im\_end|>`` that
+# didn't correspond to any source newline; that stray has been removed
+# so agents who faithfully map \n -> \\ pass.
+GT_COMPLEX_PROMPT_TWO_TB = r"<|im\_start|>system\\You are a helpful assistant.<|im\_end|>\\<|im\_start|>user\\\{input\}\\Please reason step by step, and put your final answer within \textbackslash\textbackslash boxed\{\}.<|im\_end|>\\<|im\_start|>assistant"
+GT_COMPLEX_PROMPT_ONE_TB = r"<|im\_start|>system\\You are a helpful assistant.<|im\_end|>\\<|im\_start|>user\\\{input\}\\Please reason step by step, and put your final answer within \textbackslash boxed\{\}.<|im\_end|>\\<|im\_start|>assistant"
+# Keep the legacy name available for any external references.
+GT_COMPLEX_PROMPT = GT_COMPLEX_PROMPT_TWO_TB
 GT_MAPPING = {
-    "Simple Prompt": (re.sub(r'\s+', '', GT_SIMPLE_PROMPT),),
-    "Complex Prompt": (
-        re.sub(r'\s+', '', GT_COMPLEX_PROMPT),
-        re.sub(r'\s+', '', GT_COMPLEX_PROMPT_DOUBLE_BACKSLASH),
-    ),
+    "Simple Prompt": [re.sub(r'\s+', '', GT_SIMPLE_PROMPT)],
+    "Complex Prompt": [
+        re.sub(r'\s+', '', GT_COMPLEX_PROMPT_TWO_TB),
+        re.sub(r'\s+', '', GT_COMPLEX_PROMPT_ONE_TB),
+    ],
 }
 
 def main():
@@ -123,23 +142,28 @@ def main():
         return False
     needed_appendix_text_content = appendix_text_content.split(r"\section{Model Prompt}")[-1]
 
-    for title, accepted_gts in GT_MAPPING.items():
+    for title, gt_alts in GT_MAPPING.items():
         content = find_desired_tcolorbox_remove_blanks(needed_appendix_text_content, title)
         if content is None:
             print(f"Not found desired tcolorbox in {title}")
             founddesiredtcolorbox_dict[title] = False
             break
         filled_content = content
-        # print("===== FILLED ======\n",filled_content)
-        # print(gt)
-        # check if the filled_content startswith gt
         normalized_filled = _normalize_text_commands(filled_content.strip())
-        normalized_gts = [_normalize_text_commands(gt.strip()) for gt in accepted_gts]
-        if not any(normalized_filled.startswith(normalized_gt) for normalized_gt in normalized_gts):
-            print(f"Filled content does not start with any accepted {title} prompt")
+        # Accept the agent's content if it starts with ANY of the acceptable
+        # renderings of this prompt.  See GT_MAPPING for why the Complex Prompt
+        # has multiple alternatives.
+        matched = False
+        for gt in gt_alts:
+            normalized_gt = _normalize_text_commands(gt.strip())
+            if normalized_filled.startswith(normalized_gt):
+                matched = True
+                break
+        if not matched:
+            print(f"Filled content does not start with any acceptable {title} rendering")
             founddesiredtcolorbox_dict[title] = False
             break
-        founddesiredtcolorbox_dict[title]= True
+        founddesiredtcolorbox_dict[title] = True
         print(f"√ Found desired tcolorbox in {title}")
     
     if not founddesiredtcolorbox_dict['Simple Prompt'] or not founddesiredtcolorbox_dict['Complex Prompt']:
