@@ -10,6 +10,28 @@ import pandas as pd
 
 from utils.general.helper import normalize_str
 
+
+def _proctor_tokens(raw):
+    """Tokenize proctor names while ignoring the Professor honorific."""
+    if raw is None:
+        return set()
+
+    text = str(raw).strip().lower()
+    text = re.sub(r'\bprof(?:essor|\.)?\b', ' ', text)
+    return set(re.findall(r'\w+', text))
+
+
+def proctor_match(agent_val, ground_val):
+    """Require every GT proctor token to appear in the agent's answer."""
+    agent_tokens = _proctor_tokens(agent_val)
+    ground_tokens = _proctor_tokens(ground_val)
+
+    if not agent_tokens or not ground_tokens:
+        return str(agent_val).strip().lower() == str(ground_val).strip().lower()
+
+    return ground_tokens <= agent_tokens
+
+
 def check_local(agent_workspace: str, groundtruth_workspace: str):
     """
     Compare the contents of two xlsx files (exam_schedule.xlsx), and check if they are exactly the same.
@@ -91,6 +113,14 @@ def check_local(agent_workspace: str, groundtruth_workspace: str):
                     if not is_match:
                         course_matches = False
                         course_diffs.append(f"{col}: Agent='{val_agent_norm}' vs Ground='{val_ground_norm}'")
+                elif col == 'Proctor Name':
+                    # GT full names require all name tokens; honorifics like
+                    # "Professor Smith" are accepted for one-off replacements.
+                    agent_raw = 'TBD' if pd.isna(val_agent) else str(val_agent)
+                    ground_raw = 'TBD' if pd.isna(val_ground) else str(val_ground)
+                    if not proctor_match(agent_raw, ground_raw):
+                        course_matches = False
+                        course_diffs.append(f"{col}: Agent='{val_agent_norm}' vs Ground='{val_ground_norm}'")
                 elif col == 'Information Source(Announcement/Email/Message)' and row_ground['Course Code'] == 'NET101':
                     # for this specific course, we can accept examples like email&announcement etc.
                     if 'email' in val_agent_norm.lower():
@@ -143,5 +173,4 @@ def check_local(agent_workspace: str, groundtruth_workspace: str):
             
     except Exception as e:
         return False, f'Error reading xlsx files: {str(e)}'
-
 
