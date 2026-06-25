@@ -77,8 +77,16 @@ GT_SIMPLE_PROMPT = r"Question:\\\{input\}\\Answer:\\Let's think step by step."
 #     the .py source text, where `\\` was taken as two literal
 #     backslashes to display.
 # Both are common in M-STaR-style boxes; we accept either prefix.
-GT_COMPLEX_PROMPT_TWO_TB = r"<|im\_start|>system\\You are a helpful assistant.<|im\_end|>\\<|im\_start|>user\\\{input\}\\Please reason step by step, and put your final answer within \textbackslash\textbackslash boxed\{\}.\\<|im\_end|>\\<|im\_start|>assistant"
-GT_COMPLEX_PROMPT_ONE_TB = r"<|im\_start|>system\\You are a helpful assistant.<|im\_end|>\\<|im\_start|>user\\\{input\}\\Please reason step by step, and put your final answer within \textbackslash boxed\{\}.\\<|im\_end|>\\<|im\_start|>assistant"
+# Note: the qwen-boxed runtime template has NO newline between
+# ``\boxed{}.`` and ``<|im_end|>`` (they sit on the same line in the
+# Python source after escape resolution).  Per the task's "use \\ for
+# new lines" rule, the LaTeX rendering therefore has no \\ between them
+# either — \\ only appears at runtime-newline positions.  Earlier GT
+# strings had a stray \\ between ``\boxed\{\}.`` and ``<|im\_end|>`` that
+# didn't correspond to any source newline; that stray has been removed
+# so agents who faithfully map \n -> \\ pass.
+GT_COMPLEX_PROMPT_TWO_TB = r"<|im\_start|>system\\You are a helpful assistant.<|im\_end|>\\<|im\_start|>user\\\{input\}\\Please reason step by step, and put your final answer within \textbackslash\textbackslash boxed\{\}.<|im\_end|>\\<|im\_start|>assistant"
+GT_COMPLEX_PROMPT_ONE_TB = r"<|im\_start|>system\\You are a helpful assistant.<|im\_end|>\\<|im\_start|>user\\\{input\}\\Please reason step by step, and put your final answer within \textbackslash boxed\{\}.<|im\_end|>\\<|im\_start|>assistant"
 # Keep the legacy name available for any external references.
 GT_COMPLEX_PROMPT = GT_COMPLEX_PROMPT_TWO_TB
 GT_MAPPING = {
