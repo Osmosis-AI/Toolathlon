@@ -117,16 +117,21 @@ async def get_my_quiz_scores(base_url: str, api_token: str, course_id: int) -> D
                                 submission = quiz_submissions[0]
                                 quiz_points_possible = submission.get('quiz_points_possible', points_possible)
 
-                                # Prefer kept_score over score.
+                                # Prefer ``kept_score`` over ``score``.
                                 #
-                                # Under Canvas's keep_highest scoring policy
-                                # (used by every quiz in this task), kept_score
-                                # is the value Canvas records in the gradebook:
-                                # the max across all attempts. score is just the
-                                # most recent attempt's score, which can be null
-                                # if the student started but did not finish a
-                                # fresh attempt. Treating that case as no score
-                                # punishes an already full-credit quiz.
+                                # Under Canvas's ``keep_highest`` scoring policy
+                                # (used by every quiz in this task), ``kept_score``
+                                # is the value Canvas records in the gradebook —
+                                # the max across all attempts.  ``score`` is just
+                                # the most recent attempt's score, which can be
+                                # ``null`` if the student started but did not
+                                # finish a fresh attempt (e.g. DB101 is set up
+                                # pre-completed at attempt 1; an agent that
+                                # tries to submit triggers a fresh attempt 2 in
+                                # ``untaken`` state with ``score=null`` while
+                                # ``kept_score`` remains 80.0).  Treating that
+                                # case as "no score" punishes the agent for a
+                                # quiz that already had a full grade locked in.
                                 kept_score = submission.get('kept_score')
                                 effective_score = kept_score if kept_score is not None else submission.get('score')
 
