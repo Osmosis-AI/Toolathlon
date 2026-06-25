@@ -24,16 +24,6 @@ _TYPE_ALIASES = {
 }
 
 
-def _canonical_type_name(value: str):
-    """Return canonical JSON Schema type name for common source spellings."""
-    parts = [p.strip().lower() for p in value.split(",")]
-    for part in parts:
-        canonical = _TYPE_ALIASES.get(part)
-        if canonical is not None:
-            return canonical
-    return None
-
-
 def normalize_value_for_comparison(value, path=""):
     """Normalize value for comparison, handling known acceptable differences."""
     if isinstance(value, str):
@@ -42,7 +32,7 @@ def normalize_value_for_comparison(value, path=""):
         # identical schemas compare equal regardless of which spelling
         # the source dataset (or the agent's conversion) chose.
         if path.endswith(".type"):
-            canonical = _canonical_type_name(value)
+            canonical = _TYPE_ALIASES.get(value.strip().lower())
             if canonical is not None:
                 return canonical
         # Normalize JSON string values
@@ -129,12 +119,8 @@ def deep_compare_with_tool_call_mapping(obj1, obj2, path=""):
             current_path = f"{path}.{key}" if path else key
             
             if key not in obj1:
-                if key == "required" and obj2[key] is None:
-                    continue
                 differences.append(f"{current_path}: missing from left, right value: {obj2[key]}")
             elif key not in obj2:
-                if key == "required" and obj1[key] is None:
-                    continue
                 differences.append(f"{current_path}: missing from right, left value: {obj1[key]}")
             elif key == 'messages':
                 # Use special message comparison logic
@@ -163,16 +149,7 @@ def compare_messages_with_tool_call_mapping(msgs1, msgs2, path):
         if msg1.get('role') != msg2.get('role'):
             differences.append(f"{current_path}.role: value mismatch - '{msg1.get('role')}' vs '{msg2.get('role')}'")
         
-        if msg1.get('role') == 'tool' and msg2.get('role') == 'tool':
-            content_matches = is_semantically_equivalent(
-                msg1.get('content'),
-                msg2.get('content'),
-                f"{current_path}.content",
-            )
-        else:
-            content_matches = msg1.get('content') == msg2.get('content')
-
-        if not content_matches:
+        if msg1.get('content') != msg2.get('content'):
             differences.append(f"{current_path}.content: value mismatch - '{msg1.get('content')}' vs '{msg2.get('content')}'")
         
         # For tool_calls and tool_call_id, compare only content not ID
@@ -208,12 +185,8 @@ def deep_compare(obj1, obj2, path=""):
             current_path = f"{path}.{key}" if path else key
             
             if key not in obj1:
-                if key == "required" and obj2[key] is None:
-                    continue
                 differences.append(f"{current_path}: missing from left, right value: {obj2[key]}")
             elif key not in obj2:
-                if key == "required" and obj1[key] is None:
-                    continue
                 differences.append(f"{current_path}: missing from right, left value: {obj1[key]}")
             else:
                 differences.extend(deep_compare(obj1[key], obj2[key], current_path))
