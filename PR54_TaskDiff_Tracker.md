@@ -27,7 +27,7 @@ When a decision here reverses an entry there, this file is the authoritative one
 | 2 | `[PR]` ✅ applied | `sync-todo-to-readme` | no | yes | `docs/task.md`, `docs/task_cn.md`, `groundtruth_workspace/README.md` | **Adopt PR per user decision (2026-06-25) — reverses the earlier reject in `UpdateLogs` (rows 56/111/149).** PR narrows the task to a main→dev TODO diff (215-entry README GT) instead of the full-scan口径 (240). Now aligned to PR. |
 | 3 | `[OURS]` | `canvas-arrange-exam` | yes | yes | `docs/task.md`, `evaluation/check_local.py`, `files/course_config.json`, `groundtruth_workspace/exam_schedule.xlsx` | Our verified fix `a95e67d7` (full proctor names, token-subset compare, CS301 closed-book). |
 | 4 | `[OURS]` | `canvas-do-quiz` | yes | yes | `evaluation/check_remote.py` | Our verified fix `67c44db9` (kept-score grading). |
-| 5 | `[OURS]` | `email-paper-homepage` | yes | yes | `docs/task.md`, `evaluation/main.py` | Our verified fix `36bb920d` (homepage hardening + interview timezone). PR scope-expansion rejected (`UpdateLogs` `d170d91b`). |
+| 5 | `[PR]` ✅ applied | `email-paper-homepage` | yes | yes | `docs/task.md`, `evaluation/main.py` | **Adopt PR per user decision (2026-06-25) — reverses the earlier reject `d170d91b`.** PR broadens the task scope from "newly-accepted papers only" to "all accepted/published papers": Enhancing LLMs now requires its codeurl, Optimizing LLMs becomes `to_be_released` (no codeurl), the Workshop check is dropped, and the allowed-modify file set expands. Now aligned to PR. |
 | 6 | `[OURS]` | `k8s-mysql` | yes | yes | `groundtruth_workspace/gtq2.csv` | Our verified fix `7b5c257c` (gtq2 regeneration). |
 | 7 | `[OURS]` | `notion-hr` | yes | yes | `evaluation/main.py` | Our verified fix `f9eaf3b8` (degree case comparison). |
 | 8 | `[OURS]` | `notion-personal-website` | yes | yes | `evaluation/check_remote.py` | Our verified fix `a1c9c087` (shared helper / pagination). |
@@ -40,8 +40,8 @@ When a decision here reverses an entry there, this file is the authoritative one
 
 ## Summary
 
-- **2** adopt PR (`imagenet`, `sync-todo-to-readme`) — applied 2026-06-25, now aligned to PR.
-- **8** keep ours (own verified fix differs from PR).
+- **3** adopt PR (`imagenet`, `sync-todo-to-readme`, `email-paper-homepage`) — applied 2026-06-25, now aligned to PR.
+- **7** keep ours (own verified fix differs from PR).
 - **4** reject PR (keep pre-PR version on purpose).
-- After the 2 adoptions, **12** tasks under `tasks/` still differ from PR (all intentional).
+- After the 3 adoptions, **11** tasks under `tasks/` still differ from PR (all intentional).
 - Non-task files that also differ (out of scope here): `UpdateLogs_CommonIssues.md`, `scripts/run_single_containerized.sh`, `scripts/run_single_decoupled.sh`, `utils/app_specific/notion/ops.py`.
