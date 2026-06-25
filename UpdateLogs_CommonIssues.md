@@ -161,6 +161,35 @@ Status legend:
 | [x] | `notion-movies` | `c99925e7` | `tasks/finalpool/notion-movies/docs/task.md`, `tasks/finalpool/notion-movies/docs/user_system_prompt.md`, `tasks/finalpool/notion-movies/evaluation/check_remote.py` | Ship sandbox permissive grader. | Accepted and applied per user decision; PR removes the current prompt/user-system requirement that the Star Wars trailer be embedded/follow existing subpage format and changes the grader from requiring an actual Notion `embed`/`video` block to accepting the correct YouTube video ID in a Trailer/YouTube property or page content. The fixed Notion MCP v1.9.0 schema and our mounted patch both expose only paragraph/bulleted-list child creation with rich-text links for `Append block children`, not `embed`, `video`, or `bookmark`, so the permissive check better matches the available tool surface. |
 | [x] | `canvas-arrange-exam` | `8dc10e05` | `tasks/finalpool/canvas-arrange-exam/evaluation/check_local.py`, `tasks/finalpool/canvas-arrange-exam/groundtruth_workspace/exam_schedule.xlsx` | Use full instructor names in GT, token-subset proctor compare, and mark CS301 closed-book. | Accepted and applied per user decision, with follow-up alignment from local review: prompt now explicitly asks for full proctor names, the CS301 announcement identifies the replacement proctor as `Black Smith`, and GT uses `Black Smith` plus `Closed-book`. Evidence matches the rationale: Canvas users expose full instructor names for default instructors, and CS301's generated welcome announcement publishes `Exam Type: Closed Book` before the January proctor replacement announcement. Evaluator keeps token-subset proctor matching without the duplicate import/misleading PR comment. |
 
+# PR54 Second Refresh Review Tracker
+
+Source PR: https://github.com/hkust-nlp/Toolathlon/pull/54
+
+Refresh range: `4a70aae0..bd8609b7` after the PR54 refresh review pass.
+
+Status legend:
+- `[ ]` not reviewed
+- `[~]` in review / needs discussion
+- `[x]` reviewed and accepted/rejected/no-op
+- `[!]` reviewed and needs follow-up fix
+
+| Status | Area | PR commit(s) | Changed files | Claimed fix | Progress notes |
+| --- | --- | --- | --- | --- | --- |
+| [x] | `vlm-history-completer` | `8276b934` | `tasks/finalpool/vlm-history-completer/groundtruth_workspace/groundtruth.json` | Revert SD-1.5 canonical aliases. | No-op / accepted as PR-head alignment; the commit restores the Make-a-Scene Meta source URL that current branch already keeps, so `HEAD..origin/pr/54` has no diff for this task. |
+| [x] | `university-course-selection` | `2985bdc0` | `tasks/finalpool/university-course-selection/evaluation/check_local.py` | Combine strict column checks with lenient field comparisons. | Accepted in full and applied per user decision: replaced the branch's grader with the PR-head version. Compared to the prior branch grader (plain `normalize_str` equality on every column + exact column set, any extra/missing column fails, any blank required cell drops the whole row), the PR version ADDS: instructor-title stripping (`陈彤兵 讲师`≈`陈彤兵`, `龚金平 教授(教学为主型)`≈`龚金平`), order-independent restriction multiset compare with `级`-suffix and program/quality-tag (`思政B`, `上海市精品课程团队`/`精品课程`) stripping, tolerance of extra columns (only required-column *presence* enforced), Course-ID-only row dropping, and Course-ID-keyed row sorting. Blank restriction cell still fails (reference requires `无`) and Class Time stays strict (`[1-16]` not stripped). Supersedes the branch's `871090dc Require course selection columns to match` exact-column stance. prompt / GT / initial_workspace are byte-identical across branches, so the decision was purely grader leniency. |
+| [ ] | `identify-all-songs` | `2ee41422` | `tasks/finalpool/identify-all-songs/evaluation/check_content.py` | Revert `Nothin' on You` / `Nothing On You` alias tolerance. | Pending review. |
+| [ ] | `oil-price` | `5bbd6215` | `tasks/finalpool/oil-price/evaluation/main.py`, `tasks/finalpool/oil-price/initial_workspace/detail.md` | Port T's grader while keeping annualized-return leniency. | Pending review. |
+| [ ] | `merge-hf-datasets` | `15d043c2`, `33e11edc` | No net files in refreshed PR diff. | Revert earlier merge-hf grader tolerance commits. | Pending review / likely no-op; verify final head against current branch. |
+| [ ] | `privacy-desensitization` | `4db21313` | `tasks/finalpool/privacy-desensitization/docs/task.md`, `evaluation/main.py`, `preprocess/main.py`, `initial_workspace/files.tar.gz`, `groundtruth_workspace/gt_files.tar.gz` | Port T's privacy-desensitization version. | Pending review. |
+| [ ] | `nhl-b2b-analysis` | `cc48d732` | `tasks/finalpool/nhl-b2b-analysis/evaluation/main.py` | Revert moving spreadsheet discovery inside retry loop. | Pending review. |
+| [ ] | `inventory-sync` | `5c345540` | `tasks/finalpool/inventory-sync/evaluation/main.py` | Use `try/finally` cleanup after `grade_with_retry`. | Pending review. |
+| [ ] | `language-school` | `8ddf286e` | `tasks/finalpool/language-school/evaluation/check_local.py` | Revert CMU deadline mismatch fix. | Pending review. |
+| [ ] | `quantitative-financial-analysis` | `7ea89fe4`, `dec71525` | `tasks/finalpool/quantitative-financial-analysis/evaluation/main.py`, `groundtruth_workspace/groundtruth_data.csv` | Restore July 31 GT rows and increase Sheets retry budget. | Pending review. |
+| [ ] | `sla-timeout-monitor` | `4c17de88` | `tasks/finalpool/sla-timeout-monitor/evaluation/main.py` | Revert no-negative-poll design preservation. | Pending review. |
+| [ ] | `latex-prompt-box` | `486ce189`, `bd8609b7` | `tasks/finalpool/latex-prompt-box/evaluation/main.py` | Restore strict color with dual-`\textbackslash` acceptance and remove stray GT prompt escape. | Pending review. |
+| [ ] | `woocommerce-customer-survey` | `ac3c9ebd`, `011093a3` | `tasks/finalpool/woocommerce-customer-survey/initial_workspace/form_requirement.md` | Reconcile delivery question wording between `our` and `the`. | Pending review. |
+| [ ] | `reimbursement-form-filler` | `5570b637` | `tasks/finalpool/reimbursement-form-filler/evaluation/check_local.py` | Bridge `datetime` and string values for month cells. | Pending review. |
+
 # PR38 Task Review Tracker
 
 Source PR: https://github.com/hkust-nlp/Toolathlon/pull/38
