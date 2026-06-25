@@ -28,7 +28,7 @@ When a decision here reverses an entry there, this file is the authoritative one
 | 3 | `[PR]` ✅ applied | `canvas-arrange-exam` | yes | yes | `docs/task.md`, `evaluation/check_local.py`, `files/course_config.json`, `groundtruth_workspace/exam_schedule.xlsx` | **Adopt PR per user decision (2026-06-25) — reverses our earlier "Black Smith" choice (`a95e67d7` / `2d7f0cdd`).** PR keeps the CS301 replacement proctor as "Professor Smith" (no fabricated first name): announcement says "Professor Smith", GT Proctor cell `[7,2]` = "Smith", and the prompt drops the "fill in full names" requirement. grader logic (token-subset compare, strip "Professor") is unchanged between versions. Now aligned to PR. |
 | 4 | `[PR]` ✅ applied | `canvas-do-quiz` | yes | yes | `evaluation/check_remote.py` | **Adopt PR per user decision (2026-06-25).** Comment-only difference — both versions share the identical `kept_score`-over-`score` grading logic (our `67c44db9`); PR just has a more detailed comment (DB101 attempt-2 `untaken`/`score=null` example). No behavioral change. Now aligned to PR. |
 | 5 | `[PR]` ✅ applied | `email-paper-homepage` | yes | yes | `docs/task.md`, `evaluation/main.py` | **Adopt PR per user decision (2026-06-25) — reverses the earlier reject `d170d91b`.** PR broadens the task scope from "newly-accepted papers only" to "all accepted/published papers": Enhancing LLMs now requires its codeurl, Optimizing LLMs becomes `to_be_released` (no codeurl), the Workshop check is dropped, and the allowed-modify file set expands. Now aligned to PR. |
-| 6 | `[OURS]` | `k8s-mysql` | yes | yes | `groundtruth_workspace/gtq2.csv` | Our verified fix `7b5c257c` (gtq2 regeneration). |
+| 6 | `[PR]` ✅ applied | `k8s-mysql` | yes | yes | `groundtruth_workspace/gtq2.csv` | **Adopt PR per user decision (2026-06-25).** Trailing-newline-only difference — driver_id data (through 789) is row-identical; grader reads via `csv.DictReader` which ignores the trailing newline, so no behavioral change. Now aligned to PR. |
 | 7 | `[OURS]` | `notion-hr` | yes | yes | `evaluation/main.py` | Our verified fix `f9eaf3b8` (degree case comparison). |
 | 8 | `[OURS]` | `notion-personal-website` | yes | yes | `evaluation/check_remote.py` | Our verified fix `a1c9c087` (shared helper / pagination). |
 | 9 | `[OURS]` | `student-interview` | yes | yes | `evaluation/main.py` | Our verified fix `36bb920d` (conflict message formatting / timezone). |
@@ -40,8 +40,8 @@ When a decision here reverses an entry there, this file is the authoritative one
 
 ## Summary
 
-- **5** adopt PR (`imagenet`, `sync-todo-to-readme`, `email-paper-homepage`, `canvas-arrange-exam`, `canvas-do-quiz`) — applied 2026-06-25, now aligned to PR.
-- **5** keep ours (own verified fix differs from PR).
+- **6** adopt PR (`imagenet`, `sync-todo-to-readme`, `email-paper-homepage`, `canvas-arrange-exam`, `canvas-do-quiz`, `k8s-mysql`) — applied 2026-06-25, now aligned to PR.
+- **4** keep ours (own verified fix differs from PR).
 - **4** reject PR (keep pre-PR version on purpose).
-- After the 5 adoptions, **9** tasks under `tasks/` still differ from PR (all intentional).
+- After the 6 adoptions, **8** tasks under `tasks/` still differ from PR (all intentional).
 - Non-task files that also differ (out of scope here): `UpdateLogs_CommonIssues.md`, `scripts/run_single_containerized.sh`, `scripts/run_single_decoupled.sh`, `utils/app_specific/notion/ops.py`.
