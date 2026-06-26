@@ -7,11 +7,22 @@ import pandas as pd
 
 def normalize_legal_clause(clause_text):
     """
-    标准化法律条款编号 去除空格和换行符 (Normalize legal clause number by removing spaces and line breaks)
+    标准化法律条款编号：去除空格/换行，并去掉小括号内的款/项级细分
+    (Normalize a legal-clause reference: strip whitespace AND drop any
+    parenthesized sub-clause qualifiers such as （第三款）/（第一款第二项）.)
+
+    条款身份在"条"一级比较；prompt 的输出模板允许带「（第xx款）」，但 GT 用
+    裸条号，故比较时统一去掉小括号内容，避免款/项写法差异导致误判。款/项的
+    实际文字仍由"原始引用内容"/"新法条款内容"列校验。
+    (The prompt's output template permits a trailing "（第xx款）", but the
+    groundtruth uses the bare article number; we strip parenthetical groups
+    on BOTH sides so paragraph/item annotations don't cause false mismatches.
+    The actual paragraph/item text is still verified via the content columns.)
 
     例如： (Examples:)
-    - "《中华人民共和国物权法》第二十条第二款" -> "《中华人民共和国物权法》第二十条第二款"
-    - "第二十条第二款" -> "第二十条第二款"
+    - "《民法典》第二百二十一条（第三款）"            -> "《民法典》第二百二十一条"
+    - "《中华人民共和国婚姻法》第七条（第一款第一项）"  -> "《中华人民共和国婚姻法》第七条"
+    - "《中华人民共和国物权法》第二十条第二款"          -> "《中华人民共和国物权法》第二十条"
     """
     if not clause_text or pd.isna(clause_text):
         return ""
@@ -20,6 +31,27 @@ def normalize_legal_clause(clause_text):
 
     # 去除多余的空格 (Remove extra spaces)
     clause_text = re.sub(r'\s+', ' ', clause_text)
+
+    # 归一化法律名称：去掉「中华人民共和国」前缀，使全称与简称等价
+    # 例：《中华人民共和国民法典》 ≡ 《民法典》、《中华人民共和国合同法》 ≡ 《合同法》
+    # (Normalize statute names: drop the "中华人民共和国" prefix so full and
+    #  abbreviated forms compare equal. The groundtruth uses the full name in
+    #  the original-clause column but the short 《民法典》 in the new-law column,
+    #  so we collapse both sides to the short form on BOTH agent and GT.)
+    clause_text = clause_text.replace('中华人民共和国', '')
+
+    # 去掉小括号及其中的款/项细分（全角／半角）
+    # (Drop parenthetical sub-clause qualifiers — full-width and half-width.)
+    clause_text = re.sub(r'（[^）]*）', '', clause_text)
+    clause_text = re.sub(r'\([^)]*\)', '', clause_text)
+
+    # 只比较到第一个"条"为止：条字之后的内容（如 第二款 / 第二款第一项）一律不比较
+    # (Truncate at the first "条": only "《书名》…第xx条" participates in the
+    #  comparison; anything after the first 条 is dropped.)
+    idx = clause_text.find("条")
+    if idx != -1:
+        clause_text = clause_text[: idx + 1]
+
     clause_text = clause_text.strip()
 
     return clause_text
