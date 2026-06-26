@@ -36,12 +36,12 @@ When a decision here reverses an entry there, this file is the authoritative one
 | 11 | `[REJECT]` | `detect-revised-terms` | no | yes | `docs/task.md`, `evaluation/check_content.py`, `groundtruth_workspace/revised_terms.csv` | Rejected (`UpdateLogs` `d8973618` + rows 77/119/151): PR would loosen the clarified "quoted original text + complete new-law provisions + one-to-many separate rows" requirement and roll back the exact-normalized GT. |
 | 12 | `[REJECT]` | `nvidia-stock-analysis` | no | yes | `evaluation/main.py`, `initial_workspace/data.txt`, `initial_workspace/tips.txt`, `task_config.json` | Rejected (`UpdateLogs` `ba1fd321` + rows 64/122/157): PR removes the saved 2026-06-12 Basic-Trend snapshot / live-fallback, loosens top-holder matching, shrinks Sheet 3 instructions, and drops tools. |
 | 13 | `[REJECT]` | `search-ca-school` | no | yes | `docs/task.md`, `evaluation/main.py`, `groundtruth_workspace/AI_univ_LA_500miles_Top30.json`, `…_2024.json` | Rejected (`UpdateLogs` rows 85/147): PR swaps to a static 2016–2026 GT (`+UCR`, `-ASU`) without `cs_ranking_rank`, inconsistent with the task's CSRankings口径. |
-| 14 | `[REJECT]` | `wandb-shortest-length` | no | yes | `evaluation/main.py` | Rejected / already covered (`UpdateLogs` `02f1eb1a` + rows 74/118): current evaluator already accepts both final-step `499` and strict every-100-steps ending `400`; no PR change needed. |
+| 14 | `[PR]` ✅ applied | `wandb-shortest-length` | no | yes | `evaluation/main.py` | **Adopt PR per user decision (2026-06-26).** Behaviorally equivalent: both versions accept either the full GT (final step `499`) or the strict every-100-steps form (ending `400`) via the identical `n_ag == n_gt` / `n_ag == n_gt - 1` logic. PR only adds an explanatory comment and refactors the compare loop (drops the `compare_rows=0` init and the `.equals()` fast-path), with the same cell tolerance — no grading change. Reverses the earlier "already covered" reject; now byte-aligned to PR. |
 
 ## Summary
 
-- **8** adopt PR (`imagenet`, `sync-todo-to-readme`, `email-paper-homepage`, `canvas-arrange-exam`, `canvas-do-quiz`, `k8s-mysql`, `notion-hr`, `notion-personal-website`) — applied 2026-06-25, now aligned to PR.
-- **2** keep ours (own verified fix differs from PR).
-- **4** reject PR (keep pre-PR version on purpose).
-- After the 8 adoptions, **6** tasks under `tasks/` still differ from PR (all intentional).
+- **9** adopt PR (`imagenet`, `sync-todo-to-readme`, `email-paper-homepage`, `canvas-arrange-exam`, `canvas-do-quiz`, `k8s-mysql`, `notion-hr`, `notion-personal-website`, `wandb-shortest-length`) — applied 2026-06-25/26, now aligned to PR.
+- **2** keep ours (own verified fix differs from PR): `student-interview`, `woocommerce-product-recall`.
+- **3** set aside / reject (keep our version for now): `detect-revised-terms`, `nvidia-stock-analysis`, `search-ca-school`.
+- After the 9 adoptions, **5** tasks under `tasks/` still differ from PR (all intentional).
 - Non-task files that also differ (out of scope here): `UpdateLogs_CommonIssues.md`, `scripts/run_single_containerized.sh`, `scripts/run_single_decoupled.sh`, `utils/app_specific/notion/ops.py`.
