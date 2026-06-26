@@ -201,6 +201,7 @@ class User:
             "max_tokens": self.config.global_config.generation.max_tokens,
             "top_p": self.config.global_config.generation.top_p,
         }
+        request_params.update(self.config.global_config.generation.extra_request_params)
         if self.config.global_config.model.short_name:
             request_params["model"] = self.config.global_config.model.short_name
         

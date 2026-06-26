@@ -380,10 +380,23 @@ start_operation() {
       fi
     fi
     log_info "kind load $_img into cluster $cluster_name (offline)..."
-    if ! KIND_EXPERIMENTAL_PROVIDER="$podman_or_docker" kind load docker-image "$_img" --name "$cluster_name"; then
-      log_error "kind load failed for $_img"
-      return 1
+    load_stdout=$(mktemp)
+    load_stderr=$(mktemp)
+    if KIND_EXPERIMENTAL_PROVIDER="$podman_or_docker" kind load docker-image "$_img" --name "$cluster_name" >"$load_stdout" 2>"$load_stderr"; then
+      log_info "kind load succeeded for $_img"
+    else
+      load_rc=$?
+      log_warning "kind load failed for $_img with exit code $load_rc; continuing and letting Kubernetes pull it if needed"
+      if [ -s "$load_stdout" ]; then
+        log_warning "kind load stdout for $_img:"
+        cat "$load_stdout"
+      fi
+      if [ -s "$load_stderr" ]; then
+        log_warning "kind load stderr for $_img:"
+        cat "$load_stderr"
+      fi
     fi
+    rm -f "$load_stdout" "$load_stderr"
   done
 
   if ! apply_resources "$configpath"; then
@@ -396,8 +409,8 @@ start_operation() {
 
   # Ensure MySQL StatefulSet is ready — bounded wait so an
   # ImagePullBackOff loop doesn't hang preprocess indefinitely.  5 min
-  # is more than enough for a healthy rollout (image is pre-loaded,
-  # mysql startup ~30s); anything beyond that is a real failure.
+  # is enough for a healthy rollout when image preload succeeds or the
+  # registry pull is healthy; anything beyond that is a real failure.
   if ! kubectl --kubeconfig="$configpath" -n data rollout status statefulset/mysql-f1 --timeout=300s; then
     log_error "mysql-f1 rollout did not become ready within 5min — preprocess aborting"
     log_info "Pod state for diagnostics:"

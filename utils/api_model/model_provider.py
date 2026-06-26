@@ -36,6 +36,37 @@ from agents.version import __version__
 _USER_AGENT = f"Agents/Python {__version__}"
 _HEADERS = {"User-Agent": _USER_AGENT}
 
+_RESERVED_EXTRA_REQUEST_PARAM_KEYS = {
+    "model",
+    "messages",
+    "input",
+    "instructions",
+    "previous_response_id",
+    "include",
+    "tools",
+    "tool_choice",
+    "parallel_tool_calls",
+    "stream",
+    "stream_options",
+}
+
+
+def _get_extra_request_params(*sources) -> dict:
+    merged_params = {}
+    for source in sources:
+        extra_request_params = getattr(source, "extra_request_params", None) or {}
+        if not isinstance(extra_request_params, dict):
+            raise ValueError("extra_request_params must be a dictionary")
+        merged_params.update(extra_request_params)
+
+    filtered_params = {}
+    for key, value in merged_params.items():
+        if key in _RESERVED_EXTRA_REQUEST_PARAM_KEYS:
+            print(f"[Warning] Ignoring generation.extra_request_params['{key}']; this request field is managed by the runner.")
+            continue
+        filtered_params[key] = value
+    return filtered_params
+
 
 class ResponseOutputReasoningContent(BaseModel):
     reasoning_content: str | None
@@ -537,6 +568,7 @@ class OpenAIChatCompletionsModelWithRetry(OpenAIChatCompletionsModel):
                 logger.warning(f"[ModelProvider] Failed to load model parameters file: {e}")
 
         # Build base parameters
+        extra_request_params = _get_extra_request_params(self, model_settings)
         if user_model_params:
             # User specified parameters: only use required params + user params
             logger.info("[ModelProvider] Using USER-SPECIFIED parameters mode")
@@ -546,6 +578,7 @@ class OpenAIChatCompletionsModelWithRetry(OpenAIChatCompletionsModel):
                 'tools': converted_tools or NOT_GIVEN,
                 'tool_choice': tool_choice,
                 'stream': stream,
+                **extra_request_params,
                 **user_model_params  # User's custom parameters
             }
         else:
@@ -588,6 +621,8 @@ class OpenAIChatCompletionsModelWithRetry(OpenAIChatCompletionsModel):
             # for claude-4.5-sonnet, top_p and temperament cannot be set simultaneously
             if "claude" in self.model and any(version in self.model for version in ["4.5", "4-5"]):
                 base_params.pop('top_p')
+
+            base_params.update(extra_request_params)
         
         ret = await self._get_client().chat.completions.create(**base_params)
 
@@ -1004,6 +1039,7 @@ class OpenAIResponsesModelWithRetry(OpenAIResponsesModel):
                 logger.warning(f"[ModelProvider] Failed to load model parameters file: {e}")
 
         # Build base parameters
+        extra_request_params = _get_extra_request_params(self, model_settings)
         if user_model_params:
             # User specified parameters: only use required params + user params
             logger.info("[ModelProvider] Using USER-SPECIFIED parameters mode")
@@ -1017,6 +1053,7 @@ class OpenAIResponsesModelWithRetry(OpenAIResponsesModel):
                 "tool_choice": tool_choice,
                 "parallel_tool_calls": parallel_tool_calls,
                 "stream": stream,
+                **extra_request_params,
                 **user_model_params  # User's custom parameters
             }
         else:
@@ -1042,6 +1079,7 @@ class OpenAIResponsesModelWithRetry(OpenAIResponsesModel):
                 "reasoning": self._non_null_or_not_given(model_settings.reasoning),
                 "metadata": self._non_null_or_not_given(model_settings.metadata),
             }
+            base_params.update(extra_request_params)
 
         return await self._client.responses.create(**base_params)
 

@@ -423,20 +423,31 @@ class TaskAgent:
                 else:
                     local_tools.append(tool_or_toolsets)
 
+        generation_settings = {
+            key: value
+            for key, value in vars(self.agent_config.generation).items()
+            if key != "extra_request_params"
+        }
+        model_settings = ModelSettings(
+            tool_choice=self.agent_config.tool.tool_choice,
+            parallel_tool_calls=self.agent_config.tool.parallel_tool_calls,
+            **generation_settings,
+        )
+        agent_model = self.agent_model_provider.get_model(
+            self.agent_config.model.real_name,
+            debug=self.debug,
+            short_model_name=self.agent_config.model.short_name,
+        )
+        agent_model.extra_request_params = self.agent_config.generation.extra_request_params
+
         self.agent = Agent(
             name="Assistant",
             instructions=self.task_config.system_prompts.agent,
-            model=self.agent_model_provider.get_model(self.agent_config.model.real_name, 
-                                                      debug = self.debug,
-                                                      short_model_name=self.agent_config.model.short_name),
+            model=agent_model,
             mcp_servers=[*self.mcp_manager.get_all_connected_servers()],
             tools=local_tools,
             hooks=self.agent_hooks,
-            model_settings=ModelSettings(
-                tool_choice=self.agent_config.tool.tool_choice,
-                parallel_tool_calls=self.agent_config.tool.parallel_tool_calls,
-                **{k: getattr(self.agent_config.generation, k) for k in vars(self.agent_config.generation)},
-            ),
+            model_settings=model_settings,
         )
         
         # Get all available tools
