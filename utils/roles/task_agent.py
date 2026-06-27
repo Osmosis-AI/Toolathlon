@@ -125,7 +125,14 @@ class TaskAgent:
             "agent_llm_requests": 0,
             "total_tokens": 0,
             "input_tokens": 0,
-            "output_tokens": 0
+            "output_tokens": 0,
+            "cached_input_tokens": 0,
+            "non_cached_input_tokens": 0,
+            "max_sequence_tokens": 0,
+            "max_sequence_input_tokens": 0,
+            "max_sequence_output_tokens": 0,
+            "max_input_tokens": 0,
+            "max_output_tokens": 0,
         }
 
         self.debug = debug
@@ -298,6 +305,7 @@ class TaskAgent:
             self.logs_to_record = checkpoint_data['logs_to_record']
             self.all_tools = checkpoint_data['all_tools']
             self.stats = checkpoint_data['stats']
+            self._ensure_peak_usage_stats()
             
             # Restore session info
             self.session_id = checkpoint_data.get('session_id')
@@ -325,6 +333,45 @@ class TaskAgent:
         except Exception as e:
             self._debug_print(f"Failed to load checkpoint: {e}")
             return False
+
+    def _ensure_peak_usage_stats(self) -> None:
+        usage_default = None if self.stats.get("agent_llm_requests", 0) else 0
+        self.stats.setdefault("max_sequence_tokens", usage_default)
+        self.stats.setdefault("max_sequence_input_tokens", usage_default)
+        self.stats.setdefault("max_sequence_output_tokens", usage_default)
+        self.stats.setdefault("max_input_tokens", usage_default)
+        self.stats.setdefault("max_output_tokens", usage_default)
+        self.stats.setdefault("cached_input_tokens", usage_default)
+        self.stats.setdefault("non_cached_input_tokens", usage_default)
+
+    def _update_peak_llm_usage(self, usage: Usage) -> None:
+        """Track per-request token peaks and cache totals."""
+        self._ensure_peak_usage_stats()
+        input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
+        output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
+        sequence_tokens = input_tokens + output_tokens
+
+        if (
+            self.stats["max_sequence_tokens"] is not None
+            and sequence_tokens > self.stats["max_sequence_tokens"]
+        ):
+            self.stats["max_sequence_tokens"] = sequence_tokens
+            self.stats["max_sequence_input_tokens"] = input_tokens
+            self.stats["max_sequence_output_tokens"] = output_tokens
+        if self.stats["max_input_tokens"] is not None:
+            self.stats["max_input_tokens"] = max(self.stats["max_input_tokens"], input_tokens)
+        if self.stats["max_output_tokens"] is not None:
+            self.stats["max_output_tokens"] = max(self.stats["max_output_tokens"], output_tokens)
+
+        if self.stats["cached_input_tokens"] is not None:
+            cached_input_tokens = getattr(usage, "cached_input_tokens", None)
+            non_cached_input_tokens = getattr(usage, "non_cached_input_tokens", None)
+            if cached_input_tokens is None or non_cached_input_tokens is None:
+                self.stats["cached_input_tokens"] = None
+                self.stats["non_cached_input_tokens"] = None
+            else:
+                self.stats["cached_input_tokens"] += int(cached_input_tokens)
+                self.stats["non_cached_input_tokens"] += int(non_cached_input_tokens)
     
     def _remove_checkpoint(self) -> None:
         """Remove checkpoint file."""
@@ -740,6 +787,7 @@ class TaskAgent:
                 for raw_response in result.raw_responses:
                     self.usage.add(raw_response.usage)
                     self.stats["agent_llm_requests"] += 1
+                    self._update_peak_llm_usage(raw_response.usage)
 
                 self.logs = self.build_new_logs(result.input, result.new_items, server_conversation_tracker)
                 
@@ -788,7 +836,19 @@ class TaskAgent:
         """Get cost statistics for user and agent."""
         # Add null check for self.user_simulator
         if self.user_simulator is None:
-            user_cost = {"total_cost": 0, "total_input_tokens": 0, "total_output_tokens": 0, "total_requests": 0}
+            user_cost = {
+                "total_cost": 0,
+                "total_input_tokens": 0,
+                "total_output_tokens": 0,
+                "total_cached_input_tokens": 0,
+                "total_non_cached_input_tokens": 0,
+                "total_requests": 0,
+                "max_sequence_tokens": 0,
+                "max_sequence_input_tokens": 0,
+                "max_sequence_output_tokens": 0,
+                "max_input_tokens": 0,
+                "max_output_tokens": 0,
+            }
         else:
             user_cost = self.user_simulator.get_cost_summary()
         
@@ -799,6 +859,7 @@ class TaskAgent:
         )
         
         # Update token statistics
+        self._ensure_peak_usage_stats()
         self.stats["input_tokens"] = self.usage.input_tokens
         self.stats["output_tokens"] = self.usage.output_tokens
         self.stats["total_tokens"] = self.usage.input_tokens + self.usage.output_tokens
@@ -807,7 +868,14 @@ class TaskAgent:
             "total_cost": round(total_cost, 4),
             "total_input_tokens": self.usage.input_tokens,
             "total_output_tokens": self.usage.output_tokens,
+            "total_cached_input_tokens": self.stats["cached_input_tokens"],
+            "total_non_cached_input_tokens": self.stats["non_cached_input_tokens"],
             "total_requests": self.usage.requests,
+            "max_sequence_tokens": self.stats["max_sequence_tokens"],
+            "max_sequence_input_tokens": self.stats["max_sequence_input_tokens"],
+            "max_sequence_output_tokens": self.stats["max_sequence_output_tokens"],
+            "max_input_tokens": self.stats["max_input_tokens"],
+            "max_output_tokens": self.stats["max_output_tokens"],
         }
         
         return user_cost, agent_cost
