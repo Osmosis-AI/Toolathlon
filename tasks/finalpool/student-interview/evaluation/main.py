@@ -6,17 +6,10 @@ from utils.mcp.tool_servers import MCPServerManager, call_tool_with_retry, ToolC
 import json
 from datetime import datetime, timedelta, time, timezone
 
-# Task working timezone.  The students and interviewers in this task
-# are situated in +08:00 (Beijing/Hong Kong): the calendar query
-# filter elsewhere in this file uses ``timeMin/timeMax = ...+08:00``,
-# the fixed pre-existing events (Academic Committee Meeting, PhD
-# Dissertation Defense) are declared with ``+08:00`` offsets, and the
-# hardcoded ``conflicts`` table below interprets its ``(start_hour,
-# end_hour)`` tuples as +08:00 hours.  The working-hours check
-# below converts each candidate interview event into this same frame
-# so a correctly-scheduled 09:00 +08:00 event isn't mis-read as 01:00
-# UTC (which would happen if we relied on whatever timezone Google
-# Calendar's API normalised the returned dateTime to).
+# The task is defined in Hong Kong/Beijing time: the prompt says Hong Kong
+# Time, seeded calendar events use Asia/Hong_Kong/+08:00, and the query
+# window below uses +08:00. Normalize returned Google Calendar datetimes
+# to this frame before interpreting dates or working-hour constraints.
 TASK_TZ = timezone(timedelta(hours=8))
 
 def parse_iso_time(iso_string):
@@ -71,6 +64,12 @@ def check_time_overlap(start1, end1, start2, end2):
     """Check if two time intervals overlap"""
     return start1 < end2 and end1 > start2
 
+
+def to_task_tz(dt):
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=TASK_TZ)
+    return dt.astimezone(TASK_TZ)
+
 def validate_interview_time(interview, tomorrow_date, the_day_after_tomorrow_date, already_scheduled_interviews):
     """
     Validate interview time against all constraints
@@ -86,7 +85,9 @@ def validate_interview_time(interview, tomorrow_date, the_day_after_tomorrow_dat
     
     event_start_dt = parse_iso_time(start_time['dateTime'])
     event_end_dt = parse_iso_time(end_time['dateTime'])
-    event_date = event_start_dt.date()
+    local_start_dt = to_task_tz(event_start_dt)
+    local_end_dt = to_task_tz(event_end_dt)
+    event_date = local_start_dt.date()
     
     # Check 1: Date within tomorrow/the day after tomorrow range
     if event_date not in [tomorrow_date, the_day_after_tomorrow_date]:
@@ -99,19 +100,15 @@ def validate_interview_time(interview, tomorrow_date, the_day_after_tomorrow_dat
         issues.append(f"❌ {student}: Interview duration {duration_minutes:.0f} minutes < 90 minutes")
         return False, issues
     
-    # Check 3: Working hours (8:00-17:00 in the task's TZ — see TASK_TZ
-    # at the top of the file).  Convert the event's datetime to TASK_TZ
-    # before reading ``.hour``, otherwise we'd be reading whatever
-    # timezone Google Calendar's API normalised the dateTime to
-    # (typically UTC), which doesn't reflect the local working window.
-    local_start = event_start_dt.astimezone(TASK_TZ) if event_start_dt.tzinfo else event_start_dt
-    local_end = event_end_dt.astimezone(TASK_TZ) if event_end_dt.tzinfo else event_end_dt
-    start_hour = local_start.hour
-    end_hour = local_end.hour
-    end_minute = local_end.minute
-
+    # Check 3: Working hours (8:00-17:00 in TASK_TZ). Google Calendar may
+    # return dateTime values normalized to UTC, so read hours only after
+    # converting to the task timezone.
+    start_hour = local_start_dt.hour
+    end_hour = local_end_dt.hour
+    end_minute = local_end_dt.minute
+    
     if start_hour < 8 or end_hour > 17 or (end_hour == 17 and end_minute > 0):
-        issues.append(f"❌ {student}: Interview time {local_start.strftime('%H:%M')}-{local_end.strftime('%H:%M')} not within working hours (8:00-17:00)")
+        issues.append(f"❌ {student}: Interview time {local_start_dt.strftime('%H:%M')}-{local_end_dt.strftime('%H:%M')} not within working hours (8:00-17:00)")
         return False, issues
     
     # Check 4: No conflicts with existing meetings
@@ -122,15 +119,10 @@ def validate_interview_time(interview, tomorrow_date, the_day_after_tomorrow_dat
     
     for conflict_date, conflict_start_hour, conflict_end_hour, conflict_name in conflicts:
         if event_date == conflict_date:
-            conflict_start_dt = datetime.combine(conflict_date, time(conflict_start_hour, 0))
-            conflict_end_dt = datetime.combine(conflict_date, time(conflict_end_hour, 0))
+            conflict_start_dt = datetime.combine(conflict_date, time(conflict_start_hour, 0), tzinfo=TASK_TZ)
+            conflict_end_dt = datetime.combine(conflict_date, time(conflict_end_hour, 0), tzinfo=TASK_TZ)
             
-            # Align timezones
-            if event_start_dt.tzinfo:
-                conflict_start_dt = conflict_start_dt.replace(tzinfo=event_start_dt.tzinfo)
-                conflict_end_dt = conflict_end_dt.replace(tzinfo=event_start_dt.tzinfo)
-            
-            if check_time_overlap(event_start_dt, event_end_dt, conflict_start_dt, conflict_end_dt):
+            if check_time_overlap(local_start_dt, local_end_dt, conflict_start_dt, conflict_end_dt):
                 issues.append(f"❌ {student}: Interview conflicts with {conflict_name} ({conflict_start_hour:02d}:00-{conflict_end_hour:02d}:00)")
                 return False, issues
     
@@ -147,7 +139,7 @@ def validate_interview_time(interview, tomorrow_date, the_day_after_tomorrow_dat
     
     # All checks passed
     print(f"✅ {student}: Interview arrangement valid")
-    print(f"   Time: {event_date} {event_start_dt.strftime('%H:%M')}-{event_end_dt.strftime('%H:%M')}")
+    print(f"   Time: {event_date} {local_start_dt.strftime('%H:%M')}-{local_end_dt.strftime('%H:%M')}")
     print(f"   Duration: {duration_minutes:.0f} minutes")
     return True, []
 
