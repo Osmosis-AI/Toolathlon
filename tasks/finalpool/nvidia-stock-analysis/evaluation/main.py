@@ -6,6 +6,38 @@ import pandas as pd
 from datetime import datetime, timedelta, timezone
 import numpy as np
 
+USE_BASIC_TREND_SNAPSHOT = True
+
+# Saved from the evaluator's yfinance/Yahoo Finance lookup on 2026-06-12.
+# Keeping this snapshot avoids changing Sheet 1 ground truth when Yahoo later
+# revises or removes historical share-count data.
+BASIC_TREND_GT_SNAPSHOT = [
+    {
+        "Quarter": "2024Q3",
+        "NVDA End-of-Quarter Stock Price (USD)": 121.44000244140625,
+        "Outstanding Shares (Million Shares)": 24925.39904,
+        "Market Cap (Billion USD)": 3026.94052,
+    },
+    {
+        "Quarter": "2024Q4",
+        "NVDA End-of-Quarter Stock Price (USD)": 134.2899932861328,
+        "Outstanding Shares (Million Shares)": 25413.09952,
+        "Market Cap (Billion USD)": 3412.724964,
+    },
+    {
+        "Quarter": "2025Q1",
+        "NVDA End-of-Quarter Stock Price (USD)": 108.37999725341797,
+        "Outstanding Shares (Million Shares)": 24387.557065,
+        "Market Cap (Billion USD)": 2643.123368,
+    },
+    {
+        "Quarter": "2025Q2",
+        "NVDA End-of-Quarter Stock Price (USD)": 157.99000549316406,
+        "Outstanding Shares (Million Shares)": 24347.0,
+        "Market Cap (Billion USD)": 3846.582664,
+    },
+]
+
 def _find_latest_trading_day_price(ticker_obj, end_date, max_lookback_days=10):
     """
     Find the latest trading day price within max_lookback_days before end_date.
@@ -69,17 +101,79 @@ def _fetch_get_shares_full_near(ticker_obj, target_date, window_days=30):
         return float('nan')
 
 
+def _compare_basic_trend_sheet(target_file, sheet_name, gt_df, alt_by_q=None):
+    alt_by_q = alt_by_q or {}
+
+    # Read Excel sheet to compare against
+    try:
+        df = pd.read_excel(target_file, sheet_name=sheet_name)
+    except Exception as e:
+        print(f"Error reading Excel file: {e}")
+        exit(1)
+
+    # Reset index to ensure proper row alignment
+    df = df.reset_index(drop=True)
+    gt_df = gt_df.reset_index(drop=True)
+
+    # Check if we have the expected number of rows
+    if len(df) != len(gt_df):
+        print(f"Error: Expected {len(gt_df)} quarters, but found {len(df)} rows in Excel")
+        exit(1)
+
+    cols = [
+        "NVDA End-of-Quarter Stock Price (USD)",
+        "Outstanding Shares (Million Shares)",
+        "Market Cap (Billion USD)"
+    ]
+
+    # Check if all required columns exist
+    required_columns = ["Quarter"] + cols
+    for col in required_columns:
+        if col not in df.columns:
+            print(f"Error: Required column '{col}' not found in sheet '{sheet_name}'")
+            exit(1)
+
+    # Compare each cell value in the target columns
+    for idx, row in gt_df.iterrows():
+        for col in cols:
+            gt_val = row[col]
+            file_val = df.loc[idx, col]
+            quarter = row['Quarter']
+
+            # If the primary source is NaN but the legacy live path found a
+            # secondary value, compare against that secondary value within
+            # tolerance.  This branch is retained for the disabled live path.
+            alt = alt_by_q.get(quarter, {}).get(col)
+            if pd.isna(gt_val) and alt is not None and not pd.isna(file_val):
+                if not _compare_values(alt, file_val, f"{quarter} {col} (alt)"):
+                    exit(1)
+                continue
+
+            # Use improved comparison function
+            if not _compare_values(gt_val, file_val, f"{quarter} {col}"):
+                exit(1)
+
+    print("Basic Trend check passed.")
+    return True
+
+
 def check_basic_trend(
     target_file,
     ticker="NVDA",
     sheet_name="Basic Trend"
 ):
     """
-    Compare the 'Basic Trend' sheet in the given Excel file with live Yahoo Finance NVDA data.
-    Uses improved time range matching (10 days lookback) to find the latest trading day price.
+    Compare the 'Basic Trend' sheet in the given Excel file with a saved Yahoo Finance NVDA snapshot.
+    The live Yahoo Finance path below is retained for reference and can be re-enabled by disabling
+    USE_BASIC_TREND_SNAPSHOT.
     Checks if each quarter's end-of-quarter price, outstanding shares, and market cap match within 5% error tolerance.
     """
-    
+
+    if USE_BASIC_TREND_SNAPSHOT:
+        print("Using saved Basic Trend ground truth snapshot captured from yfinance/Yahoo Finance on 2026-06-12.")
+        gt_df = pd.DataFrame(BASIC_TREND_GT_SNAPSHOT)
+        return _compare_basic_trend_sheet(target_file, sheet_name, gt_df)
+
     try:
         nvda = yf.Ticker(ticker)
     except Exception as e:
@@ -133,7 +227,7 @@ def check_basic_trend(
 
         # Fallback: when quarterly_balance_sheet is NaN for this quarter, try
         # get_shares_full.  Yahoo populates one source but not the other for
-        # some older quarters; we accept either NaN or the secondary value.
+        # some older quarters.
         if pd.isna(shares):
             secondary = _fetch_get_shares_full_near(nvda, date)
             if not pd.isna(secondary):
@@ -162,58 +256,7 @@ def check_basic_trend(
     # Create DataFrame of ground truth values
     gt_df = pd.DataFrame(result_list)
     
-    # Read Excel sheet to compare against
-    try:
-        df = pd.read_excel(target_file, sheet_name=sheet_name)
-    except Exception as e:
-        print(f"Error reading Excel file: {e}")
-        exit(1)
-    
-    # Reset index to ensure proper row alignment
-    df = df.reset_index(drop=True)
-    gt_df = gt_df.reset_index(drop=True)
-    
-    # Check if we have the expected number of rows
-    if len(df) != len(gt_df):
-        print(f"Error: Expected {len(gt_df)} quarters, but found {len(df)} rows in Excel")
-        exit(1)
-
-    cols = [
-        "NVDA End-of-Quarter Stock Price (USD)",
-        "Outstanding Shares (Million Shares)",
-        "Market Cap (Billion USD)"
-    ]
-    
-    # Check if all required columns exist
-    required_columns = ["Quarter"] + cols
-    for col in required_columns:
-        if col not in df.columns:
-            print(f"Error: Required column '{col}' not found in sheet '{sheet_name}'")
-            exit(1)
-    
-    # Compare each cell value in the target columns
-    for idx, row in gt_df.iterrows():
-        for col in cols:
-            gt_val = row[col]
-            file_val = df.loc[idx, col]
-            quarter = row['Quarter']
-
-            # If the primary (quarterly_balance_sheet) is NaN but we have a
-            # secondary (get_shares_full) value, accept either: NaN per the
-            # prompt's "if data unavailable" rule, OR the secondary value
-            # within tolerance.  Applies to shares and the derived market cap.
-            alt = alt_by_q.get(quarter, {}).get(col)
-            if pd.isna(gt_val) and alt is not None and not pd.isna(file_val):
-                if not _compare_values(alt, file_val, f"{quarter} {col} (alt)"):
-                    exit(1)
-                continue
-
-            # Use improved comparison function
-            if not _compare_values(gt_val, file_val, f"{quarter} {col}"):
-                exit(1)
-
-    print("Basic Trend check passed.")
-    return True
+    return _compare_basic_trend_sheet(target_file, sheet_name, gt_df, alt_by_q)
 
 
 def check_major_holders(target_file, ticker="NVDA", sheet_name="Major Holders Summary"):
@@ -318,22 +361,61 @@ def check_key_shareholder_details(target_file, ticker="NVDA", sheet_name="Key Sh
             print(f"Error: Required column '{col}' not found in sheet '{sheet_name}'")
             exit(1)
 
-    # Compare each row of Excel and yfinance data (assume both are sorted top N and same length)
-    num_to_check = min(len(df), len(holders))
-    print(f"Comparing top {num_to_check} institutional shareholders")
-    
-    for idx in range(num_to_check):
-        # Excel data
-        file_row = df.iloc[idx]
-        # yfinance data
-        gt_row = holders.iloc[idx]
+    # Compare the top institutional holders by shares held.  The prompt asks
+    # for top 10, or all available holders if Yahoo returns fewer than 10.
+    holders_sorted = holders.sort_values("Shares", ascending=False, na_position="last").reset_index(drop=True)
+    expected_count = min(10, len(holders_sorted))
+    expected_holders = holders_sorted.head(expected_count)
+
+    # Ignore fully blank rows that may remain from spreadsheet formatting, but
+    # fail on missing or extra populated rows.
+    non_empty_mask = df[required_columns].apply(
+        lambda row: any(not pd.isna(v) and str(v).strip() != "" for v in row),
+        axis=1,
+    )
+    df = df.loc[non_empty_mask].reset_index(drop=True)
+
+    if len(df) != expected_count:
+        print(f"Error: Expected {expected_count} institutional shareholder rows, but found {len(df)} rows in Excel")
+        exit(1)
+
+    file_sort_shares = [
+        _parse_numeric_value(row["Shares Held (Million Shares)"])
+        for _, row in df.iterrows()
+    ]
+    if any(pd.isna(v) for v in file_sort_shares):
+        print("Error: Shares Held contains NaN/invalid values, cannot verify descending sort order")
+        exit(1)
+    if any(file_sort_shares[i] + 1e-6 < file_sort_shares[i + 1] for i in range(len(file_sort_shares) - 1)):
+        print("Error: Key Shareholders Details must be sorted by Shares Held (Million Shares) from largest to smallest")
+        exit(1)
+
+    print(f"Comparing top {expected_count} institutional shareholders")
+
+    matched_file_indices = set()
+    for _, gt_row in expected_holders.iterrows():
+        gt_name = str(gt_row["Holder"]).strip()
+        match_idx = None
+        for idx, candidate_row in df.iterrows():
+            if idx in matched_file_indices:
+                continue
+            file_name_candidate = str(candidate_row["Shareholder Name"]).strip()
+            if _compare_names(gt_name, file_name_candidate):
+                match_idx = idx
+                break
+
+        if match_idx is None:
+            print(f"Error: Missing expected top institutional shareholder '{gt_name}'")
+            exit(1)
+
+        matched_file_indices.add(match_idx)
+        file_row = df.iloc[match_idx]
 
         # 1. Shareholder Name (with improved flexibility)
         file_name = str(file_row["Shareholder Name"]).strip()
-        gt_name = str(gt_row["Holder"]).strip()
         if not _compare_names(gt_name, file_name):
-            print(f"Warning: Shareholder name mismatch at row {idx+1}: expected '{gt_name}', found '{file_name}'")
-            # Continue with warning instead of exiting, as names can have variations
+            print(f"Error: Shareholder name mismatch: expected '{gt_name}', found '{file_name}'")
+            exit(1)
 
         # 2. Shares Held (Million Shares)
         file_shares = _parse_numeric_value(file_row["Shares Held (Million Shares)"])
@@ -444,28 +526,20 @@ if __name__ == "__main__":
     
     workspace_path = Path(args.agent_workspace)
     results_file = workspace_path / "results.xlsx"
-    template_file = workspace_path / "results_template.xlsx"
-    
-    # Check for task completion requirement: template should be renamed, not copied
-    if results_file.exists() and template_file.exists():
-        print("Error: Task not completed properly. Both 'results.xlsx' and 'results_template.xlsx' exist.")
-        print("The task requires renaming 'results_template.xlsx' to 'results.xlsx', not copying.")
-        exit(1)
-    
-    # Determine target file for validation
-    target_file = results_file if results_file.exists() else template_file
-    
-    if not target_file.exists():
-        print("Error: Neither 'results.xlsx' nor 'results_template.xlsx' exists.")
-        exit(1)
-    
-    # Check if task was completed (results.xlsx should exist and template should not)
+
+    # The deliverable is a populated 'results.xlsx'.  We intentionally do NOT
+    # fail if the original 'results_template.xlsx' is still present: the
+    # prompt's "rename" wording does not explicitly require removing the
+    # template, so leaving it behind is tolerated as long as a correctly
+    # populated 'results.xlsx' exists.
     if not results_file.exists():
         print("Error: Task not completed. 'results.xlsx' does not exist.")
-        print("The task requires filling the template and renaming it to 'results.xlsx'.")
+        print("The task requires filling the template and saving it as 'results.xlsx'.")
         exit(1)
+
+    target_file = results_file
     
-    print(f"Checking {target_file} with improved real-time data fetching...")
+    print(f"Checking {target_file} with saved basic trend snapshot and live holders data...")
     
     try:
         check_basic_trend(target_file)
