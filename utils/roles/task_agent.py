@@ -10,6 +10,7 @@ from pathlib import Path
 
 from agents import (
     Agent,
+    FunctionTool,
     RunConfig,
     Usage,
     # Runner,
@@ -51,6 +52,13 @@ from utils.aux_tools.overlong_tool_manager import overlong_tool_tools
 
 from utils.general.helper import print_color
 from utils.status_manager import TaskStatusManager
+from utils.openai_agents_monkey_patch.tool_name_aliases import (
+    alias_function_tools,
+    build_tool_name_aliases,
+    rewrite_tool_name_references,
+    to_model_tool_choice,
+    validate_model_tool_names,
+)
 
 local_tool_mappings = {
     "ai_webpage_summary": tool_ai_webpage_summary,
@@ -62,6 +70,20 @@ local_tool_mappings = {
     "web_search": tool_web_search,
     "handle_overlong_tool_outputs": overlong_tool_tools,
 }
+
+
+def _flatten_local_tool_mappings() -> List[FunctionTool]:
+    """Return every local FunctionTool so prompts can use canonical aliases."""
+    tools: List[FunctionTool] = []
+    for tool_or_toolsets in local_tool_mappings.values():
+        candidates = (
+            tool_or_toolsets
+            if isinstance(tool_or_toolsets, list)
+            else [tool_or_toolsets]
+        )
+        tools.extend(tool for tool in candidates if isinstance(tool, FunctionTool))
+    return tools
+
 
 class TaskStatus(Enum):
     SUCCESS = "success"
@@ -472,13 +494,29 @@ class TaskAgent:
                 else:
                     local_tools.append(tool_or_toolsets)
 
+        # Local FunctionTools keep their original callbacks but expose only
+        # underscore aliases to the model.
+        local_tools, local_name_aliases = alias_function_tools(local_tools)
+
+        # Prompt files are shared with other harnesses. Rewrite tool-name
+        # references only in this OpenAI TaskAgent instance instead of editing
+        # those source files globally. Include a few legacy misspellings found
+        # in task prompts so they resolve to the same canonical alias.
+        prompt_name_aliases = build_tool_name_aliases(_flatten_local_tool_mappings())
+        prompt_name_aliases.update(local_name_aliases)
+        prompt_name_aliases["local-claim-done"] = "local_claim_done"
+        agent_instructions = rewrite_tool_name_references(
+            self.task_config.system_prompts.agent,
+            prompt_name_aliases,
+        )
+
         generation_settings = {
             key: value
             for key, value in vars(self.agent_config.generation).items()
             if key != "extra_request_params"
         }
         model_settings = ModelSettings(
-            tool_choice=self.agent_config.tool.tool_choice,
+            tool_choice=to_model_tool_choice(self.agent_config.tool.tool_choice),
             parallel_tool_calls=self.agent_config.tool.parallel_tool_calls,
             **generation_settings,
         )
@@ -491,7 +529,7 @@ class TaskAgent:
 
         self.agent = Agent(
             name="Assistant",
-            instructions=self.task_config.system_prompts.agent,
+            instructions=agent_instructions,
             model=agent_model,
             mcp_servers=[*self.mcp_manager.get_all_connected_servers()],
             tools=local_tools,
@@ -501,6 +539,7 @@ class TaskAgent:
         
         # Get all available tools
         available_tools = await self.agent.get_all_tools()
+        validate_model_tool_names(available_tools)
         for tool in available_tools:
             self.all_tools.append({
                 "type": "function",

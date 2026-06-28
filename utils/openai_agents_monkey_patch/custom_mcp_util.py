@@ -6,6 +6,9 @@ import json
 import os
 from typing import Any
 from utils.general.helper import print_color
+from utils.openai_agents_monkey_patch.tool_name_aliases import (
+    to_model_mcp_tool_name,
+)
 
 
 import shortuuid
@@ -137,9 +140,9 @@ def my_to_function_tool(
             logger.info(f"Error converting MCP schema to strict mode: {e}")
 
     return FunctionTool(
-        name=server.name
-        + "-"
-        + tool.name,  # add the server name as prefix to distinguish duplicate tool names
+        # Only the model-facing alias is normalized. The callback above keeps
+        # the original server/tool objects for the real MCP call.
+        name=to_model_mcp_tool_name(server.name, tool.name),
         description=tool.description or "",
         params_json_schema=schema,
         on_invoke_tool=invoke_func,
