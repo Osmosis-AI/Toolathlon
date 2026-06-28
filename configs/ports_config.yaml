@@ -59,6 +59,7 @@ files_by_port:
     - tasks/finalpool/meeting-assign/email_config.json
     - tasks/finalpool/meeting-assign/preprocess/clean_local_emails.py
     - tasks/finalpool/meeting-assign/preprocess/main.py
+    - tasks/finalpool/meeting-assign/evaluation/main.py
     - tasks/finalpool/meeting-assign/receiver_config.json
     - tasks/finalpool/notion-find-job/emails_config.json
     - tasks/finalpool/notion-find-job/evaluation/check_local.py
