@@ -28,6 +28,7 @@ from generate_groundtruth_from_policy import (
     load_policy as load_policy_json,
     generate_claims_for_employee,
     inject_form_errors,
+    find_policy_violations,
 )
 
 from generate_policy_pdf import (
@@ -170,6 +171,21 @@ def create_invoice_pdf(filepath: str, item: Dict[str, Any], item_idx: int) -> No
             ['Category:', receipt.get('category', 'N/A'), 'Tax Amount:', tax_amount_display],
             ['Description:', receipt.get('description', 'N/A'), '', '']
         ]
+        if receipt.get('client_entertainment'):
+            invoice_data.extend([
+                [
+                    'Client Entertainment:',
+                    'Yes',
+                    'Manager Pre-Approval:',
+                    'Yes' if receipt.get('manager_pre_approval') else 'No',
+                ],
+                [
+                    'Attendee List:',
+                    receipt.get('attendee_list', 'N/A'),
+                    'Business Purpose:',
+                    receipt.get('business_purpose', 'N/A'),
+                ],
+            ])
         
         invoice_table = Table(invoice_data, colWidths=[2*inch, 2*inch, 2*inch, 1.5*inch])
         invoice_table.setStyle(TableStyle([
@@ -178,7 +194,7 @@ def create_invoice_pdf(filepath: str, item: Dict[str, Any], item_idx: int) -> No
             ('GRID', (0, 0), (-1, -1), 1, colors.black),
             ('BACKGROUND', (0, 0), (0, -1), colors.lightblue),  # Left column background
             ('BACKGROUND', (2, 0), (2, -1), colors.lightblue),  # Third column background
-            ('SPAN', (-2, -1), (-1, -1)),  # Merge the last two cells of the description row
+            ('SPAN', (2, 4), (3, 4)),  # Merge the last two cells of the description row
         ]))
         
         story.append(invoice_table)
@@ -267,7 +283,8 @@ async def main():
         policy,
         fixed_seed,
         generate_claims_for_employee,
-        inject_form_errors
+        inject_form_errors,
+        find_policy_violations,
     )
 
     # Save groundtruth (overwrite)
