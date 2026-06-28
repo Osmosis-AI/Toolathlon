@@ -160,12 +160,14 @@ def create_invoice_pdf(filepath: str, item: Dict[str, Any], item_idx: int) -> No
     if item['receipts']:
         # If there is a receipt, generate the invoice details table
         receipt = item['receipts'][0]  # Take the first receipt
+        tax_amount = receipt.get('tax_amount')
+        tax_amount_display = 'N/A' if tax_amount is None else f"CNY{tax_amount:.2f}"
         
         invoice_data = [
             ['Invoice Number:', receipt.get('invoice_number', 'N/A'), 'Date:', receipt.get('date', 'N/A')],
             ['Vendor:', receipt.get('vendor', 'N/A'), 'Amount:', f"CNY{receipt.get('amount', 0):.2f}"],
             ['City:', receipt.get('city', 'N/A'), 'Country:', receipt.get('country', 'N/A')],
-            ['Category:', receipt.get('category', 'N/A'), 'Tax Amount:', f"CNY{receipt.get('tax_amount', 0):.2f}"],
+            ['Category:', receipt.get('category', 'N/A'), 'Tax Amount:', tax_amount_display],
             ['Description:', receipt.get('description', 'N/A'), '', '']
         ]
         
