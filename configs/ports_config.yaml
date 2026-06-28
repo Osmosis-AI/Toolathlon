@@ -42,6 +42,7 @@ files_by_port:
     - tasks/finalpool/canvas-art-manager/email_config.json
     - tasks/finalpool/canvas-art-manager/preprocess/main.py
     - tasks/finalpool/canvas-homework-grader-python/email_config.json
+    - tasks/finalpool/canvas-submit-late-work/files/poste.json
     - tasks/finalpool/canvas-submit-late-work/evaluation/check_remote.py
     - tasks/finalpool/canvas-submit-late-work/preprocess/main.py
     - tasks/finalpool/course-assistant/emails_all_config.json
@@ -90,6 +91,7 @@ files_by_port:
     files:
     - deployment/poste/scripts/setup.sh
     - global_preparation/deploy_containers.sh
+    - tasks/finalpool/canvas-submit-late-work/files/poste.json
   1587:
     comment: SMTP submission port
     files:
