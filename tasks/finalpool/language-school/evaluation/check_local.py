@@ -8,11 +8,29 @@ import numpy as np
 import numbers
 from utils.general.helper import normalize_str, compare_iso_time
 
+def coerce_number(value):
+    """Convert numeric cells and currency-like strings such as ``$90`` to floats."""
+    if isinstance(value, numbers.Number):
+        return float(value)
+    if not isinstance(value, str):
+        return None
+
+    normalized = value.strip()
+    if normalized.startswith("$"):
+        normalized = normalized[1:].strip()
+    normalized = normalized.replace(",", "")
+    if not re.fullmatch(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)", normalized):
+        return None
+    return float(normalized)
+
 def compare_element(agent_element, groundtruth_element):
     agent_type = type(agent_element)
     gt_type = type(groundtruth_element)
-    if isinstance(agent_element, numbers.Number):
-        if float(agent_element) == float(groundtruth_element):
+
+    agent_number = coerce_number(agent_element)
+    gt_number = coerce_number(groundtruth_element)
+    if agent_number is not None and gt_number is not None:
+        if agent_number == gt_number:
             return False, None
         else:
             return True, f"Value diff: agent provides {agent_element} while groundtruth is {groundtruth_element}."
@@ -168,4 +186,4 @@ if __name__ == "__main__":
         print("Pass test! " + message)
     else:
         print("Test failed: " + message)
-        exit(1) 
+        exit(1)
