@@ -58,6 +58,10 @@ TASK_CONFLICT_GROUPS: Dict[str, List[str]] = {
         "woocommerce-customer-survey",
         "woocommerce-product-recall",
     ],
+    "canvas_courses": [
+        "canvas-submit-late-work",
+        "canvas-do-quiz",
+    ],
 }
 
 # Reverse index: task_id -> group_id (built once at import).
