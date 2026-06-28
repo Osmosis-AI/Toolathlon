@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import numpy as np
 
 USE_BASIC_TREND_SNAPSHOT = True
+DISPLAY_ROUNDING_ATOL = 0.005
 
 # Saved from the evaluator's yfinance/Yahoo Finance lookup on 2026-06-12.
 # Keeping this snapshot avoids changing Sheet 1 ground truth when Yahoo later
@@ -473,7 +474,7 @@ def _compare_values(gt_val, file_val, field_name, tolerance=0.05):
         gt_val: Ground truth value
         file_val: Value from Excel file
         field_name: Name of the field being compared (for error messages)
-        tolerance: Relative tolerance for comparison (default 5%)
+        tolerance: Relative tolerance against the ground truth (default 5%)
     
     Returns:
         bool: True if values match within tolerance, False otherwise
@@ -493,11 +494,25 @@ def _compare_values(gt_val, file_val, field_name, tolerance=0.05):
     except (ValueError, TypeError):
         print(f"Error: Invalid numeric values for {field_name}: expected={gt_val}, found={file_val}")
         return False
-    
-    # Check if values are close within tolerance
-    if not np.isclose(gt_val, file_val, rtol=tolerance, atol=1e-6):
-        relative_error = abs(gt_val - file_val) / abs(gt_val) if gt_val != 0 else float('inf')
-        print(f"Error: Value mismatch for {field_name}: expected={gt_val:.2f}, found={file_val:.2f}, relative_error={relative_error:.2%}")
+
+    if not np.isfinite(gt_val) or not np.isfinite(file_val):
+        print(f"Error: Non-finite numeric values for {field_name}: expected={gt_val}, found={file_val}")
+        return False
+
+    # Use the ground truth as the relative-error reference.  np.isclose(a, b)
+    # scales rtol by |b|, so the former np.isclose(gt, file) call made the
+    # tolerance depend on the submitted value and treated under/over-estimates
+    # asymmetrically.  The 0.005 absolute allowance covers half a unit at the
+    # two-decimal precision required by the task.
+    absolute_error = abs(file_val - gt_val)
+    allowed_error = tolerance * abs(gt_val) + DISPLAY_ROUNDING_ATOL
+    if absolute_error > allowed_error:
+        relative_error = absolute_error / abs(gt_val) if gt_val != 0 else float('inf')
+        print(
+            f"Error: Value mismatch for {field_name}: expected={gt_val:.2f}, "
+            f"found={file_val:.2f}, relative_error={relative_error:.2%}, "
+            f"allowed_absolute_error={allowed_error:.6f}"
+        )
         return False
     
     return True
