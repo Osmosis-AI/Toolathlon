@@ -9,6 +9,27 @@ import shortuuid
 MAX_SINGLE_TURN_RETURN_CHARS = int(os.getenv("BENCH_MAX_SINGLE_TURN_RETURN_CHARS", 100000))
 
 
+def _resolve_registered_tool_name(returned_name: str, registered_names) -> str | None:
+    """Resolve a provider-normalized name to one unambiguous registered name."""
+    names = list(registered_names)
+    if returned_name in names:
+        return returned_name
+
+    normalized_name = returned_name.replace("-", "_")
+    matches = [name for name in names if name.replace("-", "_") == normalized_name]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _canonicalize_tool_call(
+    tool_call: ResponseFunctionToolCall, registered_names
+) -> ResponseFunctionToolCall:
+    """Copy a tool call with its canonical registered name when resolvable."""
+    canonical_name = _resolve_registered_tool_name(tool_call.name, registered_names)
+    if canonical_name is None or canonical_name == tool_call.name:
+        return tool_call
+    return tool_call.model_copy(update={"name": canonical_name})
+
+
 def _truncate_overlong_tool_output(
     tool_output: Any, context_wrapper: RunContextWrapper[Any]
 ) -> Any:
@@ -40,6 +61,7 @@ def _truncate_overlong_tool_output(
         f"The full output has been saved to the file {output_path}. "
         "Please check this file carefully, as it may be very long!)"
     )
+
 
 @classmethod
 async def my_execute_function_tool_calls(
@@ -166,6 +188,10 @@ def my_process_model_response(
         if not isinstance(output, ResponseFunctionToolCall):
             continue
 
+        output = _canonicalize_tool_call(
+            output,
+            [*handoff_map.keys(), *function_map.keys()],
+        )
         tools_used.append(output.name)
 
         # Handoffs
@@ -178,22 +204,23 @@ def my_process_model_response(
             run_handoffs.append(handoff)
         # Regular function tool call
         else:
-            if output.name not in function_map:
+            function_tool = function_map.get(output.name)
+            if function_tool is None:
                 # add not found tool call processing here
                 logger.warning(f"Tool {output.name} not found in agent {agent.name}")
                 items.append(ToolCallItem(raw_item=output, agent=agent))
                 functions.append(
-                        ToolRunFunction(
-                            tool_call=output,
-                            function_tool=None,
-                        )
+                    ToolRunFunction(
+                        tool_call=output,
+                        function_tool=None,
                     )
-                continue            
+                )
+                continue
             items.append(ToolCallItem(raw_item=output, agent=agent))
             functions.append(
                 ToolRunFunction(
                     tool_call=output,
-                    function_tool=function_map[output.name],
+                    function_tool=function_tool,
                 )
             )
 
@@ -204,6 +231,7 @@ def my_process_model_response(
         computer_actions=computer_actions,
         tools_used=tools_used,
     )
+
 
 RunImpl.process_model_response = my_process_model_response
 RunImpl.execute_function_tool_calls = my_execute_function_tool_calls

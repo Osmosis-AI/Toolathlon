@@ -2,10 +2,17 @@ import os
 import re
 import json
 import asyncio
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 import urllib.parse
 from string import punctuation
 import yfinance as yf
+
+
+PRODUCT_TITLE_EXTRACTOR = (
+    r"() => { const el = document.getElementById('productTitle'); "
+    r"return el ? (el.textContent || '').trim().replace(/\s+/g, ' ') : null; }"
+)
+
 
 def extract_product_info_from_recommend_file(recommend_file_path: str) -> List[Dict]:
     """Extract product information from recommend.json file"""
@@ -52,7 +59,7 @@ def extract_product_info_from_recommend_file(recommend_file_path: str) -> List[D
         print(f"❌ Error reading recommend.json file: {e}")
         return []
 
-def find_js_content_from_result(result: str) -> str:
+def find_js_content_from_result(result: str) -> Optional[str]:
     if result is None:
         return None
         
@@ -64,10 +71,20 @@ def find_js_content_from_result(result: str) -> str:
     if startpos == -1:
         return None
 
-    xxx =  result[startpos+len("### Result"):endpos].strip().strip("'\"")
-    if xxx == "undefined" or xxx == "" or xxx=="null":
+    raw_result = result[startpos + len("### Result"):endpos].strip()
+    if raw_result in {"", "undefined", "null"}:
         return None
-    return xxx
+
+    try:
+        value = json.loads(raw_result)
+    except (TypeError, json.JSONDecodeError):
+        value = raw_result.strip("'\"")
+
+    if value is None or (
+        isinstance(value, str) and value in {"", "undefined", "null"}
+    ):
+        return None
+    return value if isinstance(value, str) else str(value)
 
 def remove_white_space_and_punctuation(text: str) -> str:
     removed_blank = re.sub(r'\s+', '', text)
@@ -130,7 +147,7 @@ async def validate_url_with_playwright_mcp(url: str) -> Tuple[bool, str, str]:
         title_result = await call_tool_with_retry(
             playwright_server,
             tool_name="browser_evaluate",
-            arguments={"function": "() => { const el = document.getElementById('productTitle'); return el ? el.value : null; }"}
+            arguments={"function": PRODUCT_TITLE_EXTRACTOR}
         )
         currency_result = await call_tool_with_retry(
             playwright_server,
@@ -493,6 +510,3 @@ async def check_local(agent_workspace: str, groundtruth_workspace: str, res_log:
     print(f"   ALL products meeting requirements: {valid_products}/{len(products)} (100%)")
     print("="*80)
     return True, None
-
-
-    
