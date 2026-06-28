@@ -22,6 +22,7 @@ from utils.evaluation.retry import grade_with_retry
 NOTION_VERSION = "2022-06-28"
 WANDB_ENTITY = "mbzuai-llm"
 WANDB_PROJECT = "Guru"
+NUMERIC_TOLERANCE = 1e-3
 
 def load_tokens(token_path: Path):
     ns = runpy.run_path(str(token_path))
@@ -242,6 +243,18 @@ def fmt_best_step(step_avg: Tuple[int, float]) -> str:
     s, a = step_avg
     return f"{s}({a:.3f})"
 
+def parse_best_step(value) -> Optional[Tuple[int, float]]:
+    """Parse ``step(average)`` while allowing harmless whitespace and precision differences."""
+    if value is None:
+        return None
+    match = re.fullmatch(
+        r"\s*([+-]?\d+)\s*\(\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\s*\)\s*",
+        str(value),
+    )
+    if not match:
+        return None
+    return int(match.group(1)), float(match.group(2))
+
 def compare_with_notion(gt_rows: List[Dict], notion_rows: List[Dict], headers: List[str]) -> Dict:
     # Align by Run Name
     gt_map = {r.get("Run Name", ""): r for r in gt_rows if r.get("Run Name")}
@@ -261,9 +274,23 @@ def compare_with_notion(gt_rows: List[Dict], notion_rows: List[Dict], headers: L
             g = gt.get(h)
             n = nt.get(h)
             if h == "Best Step (Average)":
-                if (n or "").strip() != (g or "").strip():
+                gt_best_step = parse_best_step(g)
+                notion_best_step = parse_best_step(n)
+                if gt_best_step is None or notion_best_step is None:
                     ok_all = False
-                    diffs.append({"run": name, "col": h, "gt": g, "notion": n})
+                    diffs.append({
+                        "run": name,
+                        "col": h,
+                        "gt": g,
+                        "notion": n,
+                        "reason": "invalid step(average) format",
+                    })
+                else:
+                    gt_step, gt_avg = gt_best_step
+                    notion_step, notion_avg = notion_best_step
+                    if gt_step != notion_step or abs(notion_avg - gt_avg) > NUMERIC_TOLERANCE:
+                        ok_all = False
+                        diffs.append({"run": name, "col": h, "gt": g, "notion": n})
             else:
                 if n is None or g is None:
                     if not (n is None and g is None):
@@ -271,7 +298,7 @@ def compare_with_notion(gt_rows: List[Dict], notion_rows: List[Dict], headers: L
                         diffs.append({"run": name, "col": h, "gt": g, "notion": n})
                 else:
                     try:
-                        if abs(float(n) - float(g)) > 1e-3:
+                        if abs(float(n) - float(g)) > NUMERIC_TOLERANCE:
                             ok_all = False
                             diffs.append({"run": name, "col": h, "gt": g, "notion": n})
                     except Exception:

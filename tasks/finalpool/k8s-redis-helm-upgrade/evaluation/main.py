@@ -8,6 +8,64 @@ from typing import Dict, Any
 TARGET_VERSION = "22.0.0"
 
 
+def values_equal_strict(expected: Any, actual: Any) -> bool:
+    """Compare configuration values without Python's bool/int coercion."""
+    if type(expected) is not type(actual):
+        return False
+    if isinstance(expected, dict):
+        return expected.keys() == actual.keys() and all(
+            values_equal_strict(value, actual[key])
+            for key, value in expected.items()
+        )
+    if isinstance(expected, list):
+        return len(expected) == len(actual) and all(
+            values_equal_strict(expected_item, actual_item)
+            for expected_item, actual_item in zip(expected, actual)
+        )
+    return expected == actual
+
+
+def find_preservation_mismatches(expected: Any, actual: Any, path: str = "$") -> list:
+    """Return paths where ``actual`` does not preserve ``expected``.
+
+    Helm upgrades may require additional values for chart or image compatibility.
+    Additional mapping keys are therefore allowed, while every value supplied in
+    the original configuration must remain present and unchanged. Lists remain
+    strictly identical because adding to scheduling or policy lists can change
+    the behavior of the original configuration.
+    """
+    if isinstance(expected, dict):
+        if not isinstance(actual, dict):
+            return [f"{path} (expected mapping, got {type(actual).__name__})"]
+
+        mismatches = []
+        for key, expected_value in expected.items():
+            child_path = f"{path}.{key}"
+            if key not in actual:
+                mismatches.append(f"{child_path} (missing)")
+                continue
+            mismatches.extend(
+                find_preservation_mismatches(expected_value, actual[key], child_path)
+            )
+        return mismatches
+
+    if isinstance(expected, list):
+        if not isinstance(actual, list):
+            return [f"{path} (expected list, got {type(actual).__name__})"]
+        if not values_equal_strict(expected, actual):
+            return [f"{path} (list changed)"]
+        return []
+
+    if type(expected) is not type(actual) or expected != actual:
+        return [f"{path} (value changed)"]
+    return []
+
+
+def values_preserve_expected(expected: Any, actual: Any) -> bool:
+    """Whether actual Helm values contain the complete original configuration."""
+    return not find_preservation_mismatches(expected, actual)
+
+
 def _instance_suffix(task_dir: str) -> str:
     """Read instance_suffix from configs/ports_config.yaml so the kubeconfig
     filename matches what the preprocess shell script wrote.  See the
@@ -139,16 +197,19 @@ def check_helm_upgrade(task_dir: str) -> Dict[str, Any]:
         except FileNotFoundError:
             raise Exception(f"Expected values file not found: {expected_values_path}")
         
-        # Compare actual values with expected values
-        if values == expected_values:
+        # The task requires preserving the original configuration. Chart/image
+        # compatibility values added during the upgrade are allowed.
+        preservation_mismatches = find_preservation_mismatches(expected_values, values)
+        if not preservation_mismatches:
             result["custom_values_applied"] = True
             result["verification_checks"]["values_match_expected"] = True
         else:
-            # For debugging: show what doesn't match
+            # For debugging: identify original values that are missing or changed.
             result["config_mismatch_details"] = {
                 "expected_keys": list(expected_values.keys()),
                 "actual_keys": list(values.keys()),
-                "values_equal": values == expected_values
+                "values_equal": values_equal_strict(expected_values, values),
+                "preservation_mismatches": preservation_mismatches,
             }
         
         # Basic verification checks for key configurations
