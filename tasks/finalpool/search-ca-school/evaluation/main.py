@@ -51,6 +51,16 @@ UNIVERSITY_ABBREVIATIONS = {
     "arizonastateuniversity": "arizona state university",
 }
 
+# UC San Diego's administrative city is San Diego, while the university's
+# official mailing address uses La Jolla.  The task asks only for "city" and
+# does not prescribe either convention, so accept both without relaxing city
+# matching for any other institution.
+UCSD_CITY_ALIASES = ("La Jolla", "San Diego")
+UCSD_UNIVERSITY_NAMES = {
+    normalize_str("Univ. of California - San Diego"),
+    normalize_str("University of California--San Diego"),
+}
+
 
 # ── Live-CSRankings grader ──────────────────────────────────────────────
 #
@@ -84,7 +94,7 @@ CSR_AUTHORS_URL = "https://csrankings.org/generated-author-info.csv"
 CSR_INSTITUTIONS_URL = "https://csrankings.org/institutions.csv"
 
 # Driving distances (miles) from the Los Angeles Natural History Museum,
-# plus the canonical city name CSRankings uses, for every US institution
+# plus the evaluator's default city label, for every US institution
 # that could plausibly be within 500 mi of LA.  Schools don't move, so
 # these values are stable; integer miles match the task's "integers only"
 # requirement.  An institution missing from this dict is treated as "out
@@ -332,9 +342,14 @@ def check(needed_info, groundtruth_info, allow_adjacent_swap_if_close: bool = Tr
                                f"expected {gt_school['car_drive_miles']} "
                                f"({gt_school['university']})")
             given_city = given_school['city'].replace("city of", "").replace("the", "").replace("city", "").strip()
-            if normalize_str(gt_school['city']) not in normalize_str(given_city):
+            accepted_cities = (gt_school['city'],)
+            if normalize_str(gt_school['university']) in UCSD_UNIVERSITY_NAMES:
+                accepted_cities = UCSD_CITY_ALIASES
+            if not any(normalize_str(city) in normalize_str(given_city)
+                       for city in accepted_cities):
+                expected_city = " or ".join(repr(city) for city in accepted_cities)
                 return False, (f"position {idx+1}: city mismatch — "
-                               f"agent {given_city!r} vs expected {gt_school['city']!r} "
+                               f"agent {given_city!r} vs expected {expected_city} "
                                f"({gt_school['university']})")
             # Expand "Univ." → "University" on BOTH sides so the live grader's
             # CSRankings dept names (which use "Univ.") and any "University"
