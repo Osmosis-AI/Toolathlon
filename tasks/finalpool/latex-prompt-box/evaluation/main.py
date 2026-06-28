@@ -34,6 +34,11 @@ def find_color_definition(tex_content: str) -> bool:
 
 
 def _normalize_text_commands(s: str) -> str:
+    # An empty group is the standard way to terminate a control word before
+    # adjacent text.  It has no rendered output, so ``\textless{}`` and
+    # ``\textless`` (likewise for the other text commands below) are
+    # equivalent.  Strip it before comparing the rendered characters.
+    s = re.sub(r'(\\text(?:less|greater|bar|backslash))\{\}', r'\1', s)
     s = s.replace(r'\textless', '<')
     s = s.replace(r'\textgreater', '>')
     s = s.replace(r'\textbar', '|')
