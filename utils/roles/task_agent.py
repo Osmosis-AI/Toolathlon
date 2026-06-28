@@ -95,6 +95,7 @@ class TaskAgent:
         allow_resume: bool = False,
         manual: bool = False,
         single_turn_mode: bool = False,
+        workspace_prepared: bool = False,
     ):
         self.task_config = task_config
         self.agent_config = agent_config
@@ -147,6 +148,7 @@ class TaskAgent:
         self.checkpoint_interval = 1  # Save checkpoint every N turns
 
         self.single_turn_mode = single_turn_mode
+        self.workspace_prepared = workspace_prepared
 
         self.shared_context = {}
 
@@ -937,22 +939,24 @@ class TaskAgent:
         current_dir = os.path.abspath(os.getcwd())
 
         try:
-            # Set log file and workspace dir
-            self.task_config.log_file = os.path.join(self.task_config.task_root, "traj_log.json")
-            self.task_config.agent_workspace = os.path.join(self.task_config.task_root, "workspace")
+            if not self.workspace_prepared:
+                # Preserve the legacy one-shot path exactly: it owns output path
+                # normalization, workspace initialization, preprocess, and token
+                # session loading.
+                self.task_config.log_file = os.path.join(self.task_config.task_root, "traj_log.json")
+                self.task_config.agent_workspace = os.path.join(self.task_config.task_root, "workspace")
 
-            # Preprocess status
-            self.status_manager.update_preprocess("running")
+                self.status_manager.update_preprocess("running")
 
-            # Initialize workspace (skip if checkpoint will be used)
-            if not await self.initialize_workspace():
-                self.status_manager.update_preprocess("fail")
-                return TaskStatus.FAILED
+                # Initialize workspace (skip if checkpoint will be used)
+                if not await self.initialize_workspace():
+                    self.status_manager.update_preprocess("fail")
+                    return TaskStatus.FAILED
 
-            self.status_manager.update_preprocess("done")
-            
-            # After preprocess, load task-specific local_token_key_session
-            self.task_config.load_local_token_key_session()
+                self.status_manager.update_preprocess("done")
+
+                # After preprocess, load task-specific local_token_key_session
+                self.task_config.load_local_token_key_session()
 
             # Setup MCP servers
             await self.setup_mcp_servers(self.task_config.local_token_key_session)

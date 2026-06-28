@@ -310,6 +310,7 @@ class AsyncTaskScheduler:
                 command += f" {agent_framework}"
         else:
             command = (
+                f"TOOLATHLON_PARENT_CAPTURES_RUN_LOG=1 "
                 f"bash scripts/run_single_containerized.sh {task_dir_arg} {tag} {dump_path} "
                 f"{model_short_name} {provider} {maxstep} {eval_config} {image_name}"
             )
