@@ -4,6 +4,11 @@ agent_workspace=$3
 
 # Set variables
 SCRIPT_DIR=$(dirname "$0")
+KIND_IMAGE_LOADER="${SCRIPT_DIR}/../../../../scripts/lib/kind_image_loader.sh"
+if ! source "$KIND_IMAGE_LOADER"; then
+  echo "Failed to load shared Kind image loader: $KIND_IMAGE_LOADER" >&2
+  exit 1
+fi
 k8sconfig_path_dir=${agent_workspace}/k8s_configs
 # backup_k8sconfig_path_dir=deployment/k8s/configs
 backup_k8sconfig_path_dir=${SCRIPT_DIR}/../k8s_configs
@@ -452,7 +457,7 @@ start_operation() {
   # pulls hit 404/429 even when the host has the matching ``bitnami/``
   # variant cached (different registry namespace).  We bridge by
   # retagging host-cached ``bitnami/*`` images to ``bitnamilegacy/*``
-  # before kind load — the SHA is identical, only the name differs.
+  # before loading it into Kind — the SHA is identical, only the name differs.
   #
   # Best-effort throughout: warn on failures, never abort; kubelet will
   # still fall back to upstream pulls if needed.
@@ -476,8 +481,9 @@ start_operation() {
       fi
     fi
     if "$podman_or_docker" image inspect "$dst" >/dev/null 2>&1; then
-      log_info "kind load $dst into cluster $cluster_name (offline)..."
-      KIND_EXPERIMENTAL_PROVIDER="$podman_or_docker" kind load docker-image "$dst" --name "$cluster_name" || log_warning "kind load $dst failed"
+      log_info "Loading $dst into cluster $cluster_name for the node platform (offline)..."
+      toolathlon_kind_load_image "$podman_or_docker" "$cluster_name" "$dst" || \
+        log_warning "Image preload failed for $dst"
     fi
   done
 
@@ -490,8 +496,9 @@ start_operation() {
       "$podman_or_docker" pull "$_img" || log_warning "$podman_or_docker pull $_img failed (will let kubelet retry)"
     fi
     if "$podman_or_docker" image inspect "$_img" >/dev/null 2>&1; then
-      log_info "kind load $_img into cluster $cluster_name (offline)..."
-      KIND_EXPERIMENTAL_PROVIDER="$podman_or_docker" kind load docker-image "$_img" --name "$cluster_name" || log_warning "kind load $_img failed"
+      log_info "Loading $_img into cluster $cluster_name for the node platform (offline)..."
+      toolathlon_kind_load_image "$podman_or_docker" "$cluster_name" "$_img" || \
+        log_warning "Image preload failed for $_img"
     fi
   done
 

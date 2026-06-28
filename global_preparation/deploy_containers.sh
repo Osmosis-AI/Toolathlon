@@ -58,9 +58,9 @@ echo ""
 
 # ---------------------------------------------------------------------------
 # Refresh the host's image cache for images referenced by the k8s tasks.
-# Per-task preprocess scripts then `kind load docker-image` from this cache
-# into their kind clusters offline — no Docker Hub round trip per preprocess
-# → no rate-limit issues under repeated runs.
+# Per-task preprocess scripts then use the shared platform-scoped loader to
+# stream these cached images into their Kind nodes offline — no Docker Hub
+# round trip per preprocess → no rate-limit issues under repeated runs.
 #
 # Best-effort: anonymous Docker Hub allows ~100 pulls / 6h per IP, so a
 # refresh sweep that exceeds the quota will start failing midway.  Each pull

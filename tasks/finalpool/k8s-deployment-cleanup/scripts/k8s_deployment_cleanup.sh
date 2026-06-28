@@ -4,6 +4,11 @@ agent_workspace=$2
 
 # Set variables
 SCRIPT_DIR=$(dirname "$0")
+KIND_IMAGE_LOADER="${SCRIPT_DIR}/../../../../scripts/lib/kind_image_loader.sh"
+if ! source "$KIND_IMAGE_LOADER"; then
+  echo "Failed to load shared Kind image loader: $KIND_IMAGE_LOADER" >&2
+  exit 1
+fi
 k8sconfig_path_dir=${agent_workspace}/k8s_configs
 # backup_k8sconfig_path_dir=deployment/k8s/configs
 backup_k8sconfig_path_dir=${SCRIPT_DIR}/../k8s_configs
@@ -267,20 +272,21 @@ start_operation() {
   create_cluster "${cluster_name}" "$configpath"
   verify_cluster "${cluster_name}" "$configpath"
 
-  # Pre-load images from the host's local docker cache into the kind
-  # cluster's containerd registry so apply_resources doesn't pull from
+  # Pre-load images from the host runtime cache into the Kind node's
+  # containerd store so apply_resources doesn't pull from
   # Docker Hub.  Docker Hub anonymous-pull rate limit (~100/6h per IP)
   # is easily exhausted on a busy multi-instance host.  After the
   # first run on a given host, the images stay cached and every
   # subsequent call is fully offline.
   REQUIRED_IMAGES=(nginx:1.20-alpine)
   for _img in "${REQUIRED_IMAGES[@]}"; do
-    if ! docker image inspect "$_img" >/dev/null 2>&1; then
-      log_info "Host docker cache missing $_img; pulling once..."
-      docker pull "$_img" || log_warning "docker pull $_img failed (will let kubelet retry)"
+    if ! "$podman_or_docker" image inspect "$_img" >/dev/null 2>&1; then
+      log_info "Host $podman_or_docker cache missing $_img; pulling once..."
+      "$podman_or_docker" pull "$_img" || log_warning "$podman_or_docker pull $_img failed (will let kubelet retry)"
     fi
-    log_info "kind load $_img into cluster $cluster_name (offline)..."
-    kind load docker-image "$_img" --name "$cluster_name" || log_warning "kind load $_img failed"
+    log_info "Loading $_img into cluster $cluster_name for the node platform (offline)..."
+    toolathlon_kind_load_image "$podman_or_docker" "$cluster_name" "$_img" || \
+      log_warning "Image preload failed for $_img (will let kubelet retry)"
   done
 
   apply_resources "$configpath"

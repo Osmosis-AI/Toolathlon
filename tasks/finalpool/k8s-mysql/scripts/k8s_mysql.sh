@@ -4,6 +4,11 @@ agent_workspace=$2
 
 # Set the dirname of the absolute path of this script
 SCRIPT_DIR=$(dirname "$0")
+KIND_IMAGE_LOADER="${SCRIPT_DIR}/../../../../scripts/lib/kind_image_loader.sh"
+if ! source "$KIND_IMAGE_LOADER"; then
+  echo "Failed to load shared Kind image loader: $KIND_IMAGE_LOADER" >&2
+  exit 1
+fi
 
 k8sconfig_path_dir=${agent_workspace}/k8s_configs
 backup_k8sconfig_path_dir=${SCRIPT_DIR}/../k8s_configs
@@ -367,9 +372,9 @@ start_operation() {
   # Semantics: ``$podman_or_docker image inspect`` checks if the host already has
   # the tagged image (it almost always does after first run; tagged
   # images survive Toolathlon's gentle image prune, which only removes
-  # dangling layers).  If absent, pull once.  Then ``kind load
-  # docker-image`` is a local-only copy from the host image cache into
-  # the kind node's containerd — no network call.
+  # dangling layers).  If absent, pull once.  Then the shared loader
+  # streams only the Kind node's platform into containerd, avoiding the
+  # Docker 29 multi-platform-index failure in Kind v0.20.
   REQUIRED_IMAGES=(mysql:8.4 nginx:1.14)
   for _img in "${REQUIRED_IMAGES[@]}"; do
     if ! "$podman_or_docker" image inspect "$_img" >/dev/null 2>&1; then
@@ -379,24 +384,9 @@ start_operation() {
         return 1
       fi
     fi
-    log_info "kind load $_img into cluster $cluster_name (offline)..."
-    load_stdout=$(mktemp)
-    load_stderr=$(mktemp)
-    if KIND_EXPERIMENTAL_PROVIDER="$podman_or_docker" kind load docker-image "$_img" --name "$cluster_name" >"$load_stdout" 2>"$load_stderr"; then
-      log_info "kind load succeeded for $_img"
-    else
-      load_rc=$?
-      log_warning "kind load failed for $_img with exit code $load_rc; continuing and letting Kubernetes pull it if needed"
-      if [ -s "$load_stdout" ]; then
-        log_warning "kind load stdout for $_img:"
-        cat "$load_stdout"
-      fi
-      if [ -s "$load_stderr" ]; then
-        log_warning "kind load stderr for $_img:"
-        cat "$load_stderr"
-      fi
-    fi
-    rm -f "$load_stdout" "$load_stderr"
+    log_info "Loading $_img into cluster $cluster_name for the node platform (offline)..."
+    toolathlon_kind_load_image "$podman_or_docker" "$cluster_name" "$_img" || \
+      log_warning "Image preload failed for $_img; continuing and letting Kubernetes pull it if needed"
   done
 
   if ! apply_resources "$configpath"; then

@@ -4,6 +4,11 @@ agent_workspace=$2
 
 # Set variables
 SCRIPT_DIR=$(dirname "$0")
+KIND_IMAGE_LOADER="${SCRIPT_DIR}/../../../../scripts/lib/kind_image_loader.sh"
+if ! source "$KIND_IMAGE_LOADER"; then
+  echo "Failed to load shared Kind image loader: $KIND_IMAGE_LOADER" >&2
+  exit 1
+fi
 
 k8sconfig_path_dir=${agent_workspace}/k8s_configs
 backup_k8sconfig_path_dir=${SCRIPT_DIR}/../k8s_configs
@@ -199,8 +204,9 @@ start_operation() {
       log_info "Host $podman_or_docker cache missing $_img; pulling once..."
       "$podman_or_docker" pull "$_img" || log_warning "$podman_or_docker pull $_img failed (will let kubelet retry)"
     fi
-    log_info "kind load $_img into cluster $cluster_name (offline)..."
-    KIND_EXPERIMENTAL_PROVIDER="$podman_or_docker" kind load docker-image "$_img" --name "$cluster_name" || log_warning "kind load $_img failed"
+    log_info "Loading $_img into cluster $cluster_name for the node platform (offline)..."
+    toolathlon_kind_load_image "$podman_or_docker" "$cluster_name" "$_img" || \
+      log_warning "Image preload failed for $_img"
   done
 
   if ! apply_resources "$configpath"; then

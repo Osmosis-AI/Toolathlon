@@ -4,6 +4,11 @@ agent_workspace=$3
 
 # Set variables
 SCRIPT_DIR=$(dirname "$0")
+KIND_IMAGE_LOADER="${SCRIPT_DIR}/../../../../scripts/lib/kind_image_loader.sh"
+if ! source "$KIND_IMAGE_LOADER"; then
+  echo "Failed to load shared Kind image loader: $KIND_IMAGE_LOADER" >&2
+  exit 1
+fi
 PORT=${1:-30123}  # Default port is 30123, can be overridden by the first argument
 k8sconfig_path_dir=${agent_workspace}/k8s_configs
 backup_k8sconfig_path_dir=${SCRIPT_DIR}/../k8s_configs
@@ -224,8 +229,9 @@ start_operation() {
       fi
     fi
     if "$podman_or_docker" image inspect "$_img" >/dev/null 2>&1; then
-      log_info "kind load $_img into cluster $cluster_name (offline)..."
-      KIND_EXPERIMENTAL_PROVIDER="$podman_or_docker" kind load docker-image "$_img" --name "$cluster_name" || log_warning "kind load $_img failed"
+      log_info "Loading $_img into cluster $cluster_name for the node platform (offline)..."
+      toolathlon_kind_load_image "$podman_or_docker" "$cluster_name" "$_img" || \
+        log_warning "Image preload failed for $_img"
     else
       log_warning "$_img unavailable on host after pull attempt — agent's kubectl apply will need to pull from upstream"
     fi
