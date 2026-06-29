@@ -451,7 +451,7 @@ START_CONTAINER_ARGS+=(
     # Set image
     "$IMAGE_NAME"
     # Keep the container alive for later exec
-    "sleep" "3600"
+    "sleep" "7200"
 )
 
 echo "Container start command: ${START_CONTAINER_ARGS[*]}"
