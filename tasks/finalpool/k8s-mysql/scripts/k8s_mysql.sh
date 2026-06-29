@@ -2,8 +2,9 @@
 
 agent_workspace=$2
 
-# Set the dirname of the absolute path of this script
-SCRIPT_DIR=$(dirname "$0")
+# Set the dirname of the absolute path of this script.  BASH_SOURCE keeps this
+# correct when the file is sourced by the retry regression tests.
+SCRIPT_DIR=$(dirname "${BASH_SOURCE[0]}")
 KIND_IMAGE_LOADER="${SCRIPT_DIR}/../../../../scripts/lib/kind_image_loader.sh"
 if ! source "$KIND_IMAGE_LOADER"; then
   echo "Failed to load shared Kind image loader: $KIND_IMAGE_LOADER" >&2
@@ -135,13 +136,41 @@ apply_resources() {
   local config_path=$1
   log_info "Applying resources from $resource_yaml"
   export KUBECONFIG="$config_path"
-  if kubectl apply -f "$resource_yaml"; then
-    log_info "Resources applied successfully"
-    return 0
-  else
-    log_error "Failed to apply resources"
-    return 1
-  fi
+
+  # The manifest creates the data namespace and immediately applies its
+  # default ServiceAccount.  Kubernetes' namespace controller also creates
+  # that ServiceAccount, so the first apply can lose the create race and get
+  # a transient HTTP 409 AlreadyExists.  The first attempt has already made
+  # the cluster converge; a subsequent idempotent apply then configures the
+  # existing object normally.  Retrying also covers other brief API-server
+  # startup errors without hiding persistent schema/RBAC failures.
+  local _attempt
+  local _out
+  local _rc
+  local _backoff
+  for _attempt in 1 2 3; do
+    if _out=$(kubectl apply -f "$resource_yaml" 2>&1); then
+      printf '%s\n' "$_out"
+      log_info "Resources applied successfully (attempt $_attempt/3)"
+      return 0
+    else
+      _rc=$?
+    fi
+
+    log_warning "kubectl apply attempt $_attempt/3 failed (rc=$_rc):"
+    # Preserve the complete kubectl response.  The old implementation let
+    # the nested runner discard stderr, which hid the actual 409.
+    printf '%s\n' "$_out"
+
+    if [ "$_attempt" -lt 3 ]; then
+      _backoff=$((10 * _attempt))
+      log_info "Retrying kubectl apply in ${_backoff}s..."
+      sleep "$_backoff"
+    fi
+  done
+
+  log_error "Failed to apply resources after 3 attempts"
+  return 1
 }
 
 load_f1_csv() {
@@ -502,6 +531,9 @@ check_dependencies() {
   fi
 }
 
-# Script entrypoint
-check_dependencies
-main "$@"
+# Script entrypoint.  The guard lets tests source apply_resources without
+# creating or deleting a real Kind cluster.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  check_dependencies
+  main "$@"
+fi

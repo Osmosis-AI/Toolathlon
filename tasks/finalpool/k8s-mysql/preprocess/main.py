@@ -20,10 +20,19 @@ if __name__=="__main__":
     # task wrapper would report preprocess "done" → client thinks
     # cluster ready when it isn't.  We propagate via sys.exit so
     # container_preprocess.py marks the phase as failed.
-    _, _, rc = asyncio.run(run_command(
+    _, stderr, rc = asyncio.run(run_command(
         f"bash {script_path} start {args.agent_workspace}",
         debug=True, show_output=True,
     ))
+    # run_command(show_output=True) only echoes stdout.  On failure, forward
+    # the captured stderr so Kind/kubectl errors retain their original reason
+    # in the outer preprocess log.  Successful runs may contain very noisy
+    # client diagnostics, while recovered apply errors are already emitted by
+    # k8s_mysql.sh, so do not duplicate stderr on success.
+    if stderr and rc != 0:
+        sys.stderr.write(stderr)
+        if not stderr.endswith("\n"):
+            sys.stderr.write("\n")
     if rc != 0:
         print(f"k8s_mysql.sh failed with returncode={rc}; aborting preprocess",
               file=sys.stderr)
