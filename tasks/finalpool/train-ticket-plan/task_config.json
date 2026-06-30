@@ -1,7 +1,6 @@
 {
   "needed_mcp_servers": [
     "filesystem",
-    "rail_12306",
     "terminal",
     "fetch"
   ],
@@ -12,5 +11,7 @@
     "manage_context",
     "history"
   ],
-  "meta": {}
+  "meta": {
+    "note_2026_07_01": "rail_12306 removed: 12306-mcp throws at module init time ('Error: get station name js file failed.' from getLCQueryPath in node_modules/12306-mcp/build/index.js:1103) because it cannot reach 12306.cn from the container. The server never registers any tools (probe confirmed: exits rc=1 at +4.14s, no MCP initialize response), so keeping it in needed_mcp_servers caused the gateway's all-or-nothing check to fail with 'Only 3 servers connected, expected 4'. The gateway python process then exits, its MCP children orphan to PID 1 (sleep 5400) as defunct zombies, and v3 hangs on /health for the full 900s setup timeout. Reproduced on every instance (8082/8084/8086/8088). With rail_12306 removed the task boots normally; the agent discovers it has no train-booking tool and will fail to produce train-ticket-plan.json, so the grader returns score=0, which the client records as a normal task failure (not setup_failed → not infra retry). To re-enable: pin or patch 12306-mcp so it doesn't fetch the station-name lookup over the network at init, then add rail_12306 back to needed_mcp_servers."
+  }
 }
