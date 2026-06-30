@@ -9,7 +9,7 @@
 [![Website](https://img.shields.io/badge/Website-4285F4?style=for-the-badge&logo=google-chrome&logoColor=white)](https://toolathlon.xyz/)
 [![Discord](https://img.shields.io/badge/Join_Our_Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/Da3AaW4rVs)
 [![arXiv](https://img.shields.io/badge/Paper-b31b1b?style=for-the-badge&logo=arxiv&logoColor=white)](https://arxiv.org/abs/2510.25726)
-[![Hugging Face](https://img.shields.io/badge/Trajectories-FFD21E?style=for-the-badge&logo=huggingface&logoColor=black)](https://huggingface.co/datasets/hkust-nlp/Toolathlon-Trajectories)
+[![Hugging Face](https://img.shields.io/badge/Trajectories-FFD21E?style=for-the-badge&logo=huggingface&logoColor=black)](https://huggingface.co/datasets/hkust-nlp/Toolathlon-Verified_Trajectories/tree/main)
 [![GitHub](https://img.shields.io/badge/GitHub-181717?style=for-the-badge&logo=github&logoColor=white)](https://github.com/hkust-nlp/Toolathlon)
 
 </div>
@@ -23,6 +23,8 @@ Toolathlon is a benchmark to assess language agents' general tool use in realist
 
 ## News
 [2026.06.30] 🎉 Toolathlon-Verified is released. This release marks the verified final version of Toolathlon, with task prompts, ground truths, and evaluators reviewed and aligned for the final benchmark release.
+
+[2026.06.30] 📣 We have uploaded trajectories for 6 new models on Toolathlon-Verified. Please check the [Toolathlon-Verified trajectories](https://huggingface.co/datasets/hkust-nlp/Toolathlon-Verified_Trajectories/tree/main) on Hugging Face for more details.
 
 [2025.12.12] 📣 We have setup a new documentation page for common issues and updates, please refer to [UpdateLogs_CommonIssues.md](UpdateLogs_CommonIssues.md) for more details. The document will be updated regularly to track the latest changes and issues.
 
