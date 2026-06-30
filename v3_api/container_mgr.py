@@ -395,7 +395,15 @@ async def _run_setup(execution: ExecutionState) -> None:
         # are read at agent runtime by MCP servers via paths baked
         # into the bundle's ``local_token_key_session``.  Moving them
         # would break the gateway / MCP startup.
-        STASH_SUBDIRS = ("preprocess", "evaluation", "groundtruth_workspace")
+        STASH_SUBDIRS = (
+            "preprocess",
+            "evaluation",
+            "groundtruth_workspace",
+            # ── Per-task subdirs that leak the answer ──
+            "golden",   # oil-price: contains golden/main.py — the reference
+                        # implementation script the grader cites as "source
+                        # of truth" for backtest computation.
+        )
         # Filenames (compared lower-case) that look like GT leaks at the
         # task root.  Glob-style basenames; no path components.
         STASH_LEAK_FILENAMES = {
@@ -427,6 +435,20 @@ async def _run_setup(execution: ExecutionState) -> None:
                                                       # SAFE for yahoo-analysis which has guide.md
                                                       # at initial_workspace/guide.md — only direct
                                                       # children of task root are inspected here.
+            # ── Second-batch additions (audited 2026-06-30 cont.) ──
+            # Side-output of a stashed generator script — has the expected
+            # shape + populated stock-alert records:
+            "stock_alerts_initial.xlsx",              # woocommerce-stock-alert
+            # Author dev artifacts at task root with no agent runtime use.
+            # Cumulatively they're clutter the agent could read (some leak
+            # methodology hints).  Defensive stashing keeps the agent's
+            # filesystem view tidy and removes any speculative oracle:
+            "restructure_summary.md",                 # excel-data-transformation
+            "evaluation_enhancement_report.md",       # paper-checker
+            "test_integration.py",                    # woocommerce-customer-survey
+            "convert_to_backup.py",                   # apply-phd-email
+            "station_english_name.txt",               # train-ticket-plan
+            "note.md",                                # personal-website-construct
         }
         task_in_container = f"/workspace/tasks/finalpool/{task_id}"
         # Host-side stash, namespaced by instance prefix so co-resident
