@@ -28,25 +28,38 @@ def _proctor_tokens(raw):
 
 
 def proctor_match(agent_val, ground_val):
-    """Compare proctor names.
+    """Compare proctor names with bidirectional token-subset match.
 
-    Canvas exposes the full instructor name, so when GT carries the full
-    name the agent must too — short names lose information available on
-    the platform.  Rule: GT's tokens must all appear in the agent's tokens
-    (after stripping the 'Professor' honorific on either side).  This
-    means:
-      - GT 'Debra Flores' requires agent to contain both 'debra' AND 'flores'.
-        Agent 'Debra Flores' or 'Professor Debra Flores' passes; 'Debra' alone
-        fails.
-      - GT 'Smith' (single-token, used for 'Professor Smith' replacement cases)
-        requires only 'smith' — agent 'Smith' or 'Professor Smith' passes.
+    Either side's token set being a subset of the other side passes.
+
+    Why bidirectional (not just ``GT tokens ⊆ agent tokens``):
+    the natural Canvas API path an agent uses to enumerate course
+    instructors is ``GET /api/v1/accounts/{id}/courses?include[]=teachers``,
+    whose per-teacher payload exposes ONLY ``display_name`` (the equivalent
+    of ``short_name`` — e.g. 'Debra', 'Steven', 'Christopher') — NO ``name``
+    field is returned.  To get the full instructor name an agent has to
+    make a separate ``GET /api/v1/courses/{id}/users?enrollment_type[]=teacher``
+    call, which is a less-obvious endpoint to reach for first.  The
+    final-exam announcement text doesn't restate the proctor name either
+    (it just signs off as 'Course Instructor').  So agents that follow
+    the natural API path end up writing 'Debra' while GT carries
+    'Debra Flores' — a reasonable agent choice that the previous
+    strict-on-agent rule (``g <= a``) false-failed.
+
+    Bidirectional acceptance handles every legitimate case:
+      - GT 'Debra Flores', agent 'Debra'              -> a ⊆ g  -> pass
+      - GT 'Debra Flores', agent 'Debra Flores'       -> equal -> pass
+      - GT 'Debra Flores', agent 'Professor Debra Flores' -> g ⊆ a -> pass
+        (after stripping 'Professor')
+      - GT 'Smith',        agent 'Professor Smith'    -> g ⊆ a -> pass
+      - GT 'Debra Flores', agent 'Smith'              -> neither subset -> fail (correct)
     """
     a = _proctor_tokens(agent_val)
     g = _proctor_tokens(ground_val)
     if not a or not g:
         # Fall back to TBD-string equality if either side has no real tokens
         return str(agent_val).strip().lower() == str(ground_val).strip().lower()
-    return g <= a
+    return g <= a or a <= g
 
 def check_local(agent_workspace: str, groundtruth_workspace: str):
     """
