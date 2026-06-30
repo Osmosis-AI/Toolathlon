@@ -402,6 +402,31 @@ async def _run_setup(execution: ExecutionState) -> None:
             "gt_record.md",
             "expected_results.json",
             "readme.md",  # match any case via tolower() check below
+            # ── Newly identified task-root leaks (audited 2026-06-30) ──
+            # Same shape as expected_results.json: snapshot files at task
+            # root that carry the expected answer in plain text.
+            "setup_results.json",                     # woocommerce-new-product
+            "recalled_products_info.json",            # woocommerce-product-recall
+            "test_customers_info.json",               # woocommerce-product-recall
+            # Author scripts whose code IS the answer (would let the agent
+            # read the expected output or even run the generator):
+            "create_excel_report.py",                 # canvas-submit-late-work
+            "send_reminder_emails.py",                # canvas-submit-late-work
+            "generate_groundtruth.py",                # sales-accounting
+            "build_excel_ledger.py",                  # sales-accounting
+            "verify_groundtruth.py",                  # sync-todo-to-readme
+            "generate_initial_excel.py",              # woocommerce-stock-alert
+            # Test files at task root that bake in pass/fail oracles:
+            "test_evaluation.py",                     # paper-checker
+            "test_evaluation_enhanced.py",            # paper-checker
+            "test_enhanced_evaluation.py",            # game-statistics
+            "test_check_local.py",                    # reimbursement-form-filler
+            # Author notes / solution outlines:
+            "readme_xiaochen.md",                     # canvas-do-quiz (validates a specific quiz answer)
+            "guide.md",                               # ipad-edu-price (literal 4-step solution outline).
+                                                      # SAFE for yahoo-analysis which has guide.md
+                                                      # at initial_workspace/guide.md — only direct
+                                                      # children of task root are inspected here.
         }
         task_in_container = f"/workspace/tasks/finalpool/{task_id}"
         # Host-side stash, namespaced by instance prefix so co-resident
