@@ -93,6 +93,7 @@ GT_STRUCTURE = {
 
         "School/Applications_Materials/Recommendation_Letter_1.pdf",
         "School/Applications_Materials/Recommendation_Letter_2.pdf",
+        "School/Applications_Materials/cv-gboeing.pdf",
      
         "School/Courses_Materials/exam.xlsx",
 
@@ -132,7 +133,6 @@ GT_STRUCTURE = {
         # Miss
         # "Work/JD_Galary/Tencent_Senior_Software_Engineer_Recruitment.pdf",
 
-        "Work/Job_Application_Materials/cv-gboeing.pdf",
         "Work/Job_Application_Materials/Internship_application_form.xlsx",
 
         # Miss
