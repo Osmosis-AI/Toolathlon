@@ -15,32 +15,33 @@
 </div>
 
 ## Introduction
-Toolathlon is a benchmark to assess language agents' general tool use in realistic environments. It features 600+ diverse tools based on real-world software environments. Each task requires long-horizon tool calls to complete. Below we show a demo task where the agent needs to automatically check assignments in the email box, and grade them on Canvas.
+Toolathlon is a benchmark to assess language agents' general tool use in realistic environments. It features 600+ diverse tools based on real-world software environments. Each task requires long-horizon tool calls to complete. This repository corresponds to the Toolathlon-Verified final release. Below we show a demo task where the agent needs to automatically check assignments in the email box, and grade them on Canvas.
 
 <div align="center">
   <img src="assets/demo.gif" width="100%" alt="Demo">
 </div>
 
 ## News
-[2026.06.30] 🎉 Toolathlon-Verified is released. This release marks the verified final version of Toolathlon, with task prompts, ground truths, and evaluators reviewed and aligned for the final benchmark release.
+[2026.06.30] 🎉 Toolathlon-Verified is released. This release marks the verified final version of Toolathlon, with task prompts, ground truths, and evaluators reviewed and aligned for the final benchmark release. We have also uploaded trajectories for 6 new models to the [Toolathlon-Verified trajectories](https://huggingface.co/datasets/hkust-nlp/Toolathlon-Verified_Trajectories/tree/main) dataset on Hugging Face.
 
-[2026.06.30] 📣 We have uploaded trajectories for 6 new models on Toolathlon-Verified. Please check the [Toolathlon-Verified trajectories](https://huggingface.co/datasets/hkust-nlp/Toolathlon-Verified_Trajectories/tree/main) on Hugging Face for more details.
+[2025.12.12] 📣 We have set up a new documentation page for common issues and updates, please refer to [UpdateLogs_CommonIssues.md](UpdateLogs_CommonIssues.md) for more details. The document will be updated regularly to track the latest changes and issues.
 
-[2025.12.12] 📣 We have setup a new documentation page for common issues and updates, please refer to [UpdateLogs_CommonIssues.md](UpdateLogs_CommonIssues.md) for more details. The document will be updated regularly to track the latest changes and issues.
+[2025.12.5] 📣 We have updated the trajectories for 4 new models (gemini-3-pro, claude-4.5-opus, gpt-5.1, deepseek-v3.2-thinking) on [Hugging Face](https://huggingface.co/datasets/hkust-nlp/Toolathlon-Trajectories), take a look if you are interested.
 
-[2025.12.5] 📣 We have updated the trajectories for 4 new models (gemini-3-pro, claude-4.5-opus, gpt-5.1, deepseek-v3.2-thinking) on [Huggingface](https://huggingface.co/datasets/hkust-nlp/Toolathlon-Trajectories), take a look if you are interested.
+[2025.11.28] 🚀 We have provided a ready-to-use public eval service (you do not need to set anything up!), please refer to [EVAL_SERVICE_README.md](EVAL_SERVICE_README.md) for more details.
 
-[2025.11.28] 🚀 We have provided a ready-to-use public eval service (you do not need to setup anything!), please refer to [EVAL_SERVICE_README.md](EVAL_SERVICE_README.md) for more details.
+## Sandbox Version
+We also provide a sandboxed version of Toolathlon in the [`toolathlon-sandbox`](https://github.com/hkust-nlp/Toolathlon/tree/toolathlon-sandbox) branch.
 
 ## Quick Start
-> Basically you have four ways of running Toolathlon evaluation:
+> There are four ways to run Toolathlon evaluation:
 > 1. Using our public evaluation service: Check [EVAL_SERVICE_README.md](EVAL_SERVICE_README.md) for more details.
-> 2. Setup your own Toolathlon evaluation service on your own machine as detailed below.
+> 2. Set up your own Toolathlon evaluation service on your own machine as detailed below.
 > 3. If you are a major user that will use Toolathlon evaluation a lot, you can also contact us (jlini@cse.ust.hk / junxianh@cse.ust.hk), we may be able to provide a dedicated evaluation service for you (for free). 
 > 4. If you have an API endpoint and just want to test your model, you can contact us (jlini@cse.ust.hk / junxianh@cse.ust.hk) and we are happy to help you run evaluation on Toolathlon with your given API endpoint.
 
 ### Using Our Public Evaluation Service 
-We provide Toolathlon evaluation as a service on public servers, where we have setup all the required MCP accounts and you don't need to worry about the setup -- you don't even need to install any MCP-related dependencies, evaluation can be ran by just communicating with our public server such as:
+We provide Toolathlon evaluation as a service on public servers, where we have set up all the required MCP accounts and you don't need to worry about the setup -- you don't even need to install any MCP-related dependencies, and evaluation can be run by communicating with our public server:
 ```bash
 # Quick running for one task:
 cat > debug_tasks.txt << EOF
@@ -65,7 +66,7 @@ Please make sure to check [EVAL_SERVICE_README.md](EVAL_SERVICE_README.md) for m
 
 ---------------------------------
 
-Besides using the evaluation service, below we introduce how to setup the Toolathlon evaluation on your own machine.
+Besides using the evaluation service, below we introduce how to set up Toolathlon evaluation on your own machine.
 
 ### Installation Dependencies
 
@@ -92,7 +93,7 @@ bash global_preparation/install_env_minimal.sh [true|false] # `true` if you have
 
 
 #### Docker/Podman
-For each task we setup a separate container for it to be executed. We assume you have [docker](https://www.docker.com/) or [podman](https://podman.io/) installed and correctly configurated. Please specify your choice on these two in `configs/global_configs.py`.
+For each task we set up a separate container for execution. We assume you have [docker](https://www.docker.com/) or [podman](https://podman.io/) installed and correctly configured. Please specify your choice between these two in `configs/global_configs.py`.
 
 Then, pull our prepared image:
 
@@ -113,7 +114,7 @@ export TOOLATHLON_OPENAI_BASE_URL="https://your-custom-endpoint.com" # e.g. "htt
 This will use our **unified** model provider (more details in `utils/api_model/model_provider.py`). You can also use any model deployed on your own machine, like via [vLLM](https://github.com/vllm-project/vllm) or [SGLang](https://github.com/sgl-project/sglang), in that case you do not need to set the api key.
 
 
-(Optional) We also provide some pre-configurated options for you in `configs/global_configs.py` to manage all LLM APIs. You may open this file and fill in the api keys in it, and specify which provider you want to use later. 
+(Optional) We also provide some preconfigured options for you in `configs/global_configs.py` to manage all LLM APIs. You may open this file and fill in the api keys in it, and specify which provider you want to use later.
 You can find details about model providers in `utils/api_model/model_provider.py`.
 
 ### Quick Example
@@ -124,7 +125,7 @@ After the above two steps, we provide a very quick example here. We use *claude-
 bash scripts/run_single_containerized.sh finalpool/find-alita-paper quickstart ./dumps_quick_start/anthropic_claude-sonnet-4.5 anthropic/claude-sonnet-4.5
 ```
 
-You can find the resulted logs, trajectories, and agent workspace all in `dumps_quick_start/anthropic_claude-sonnet-4.5/finalpool/find-alita-paper`.
+You can find the resulting logs, trajectories, and agent workspace all in `dumps_quick_start/anthropic_claude-sonnet-4.5/finalpool/find-alita-paper`.
 
 ## Full Preparation
 
@@ -154,7 +155,7 @@ You can find more details in `deployment/*/scripts/setup.sh` for each local appl
 
 ### MCP Servers Verification
 
-Make sure you have finished all the previous steps, and then you can run the following script to check if all MCP servers are working properly, after you setup all the above configs and deployed the app containers:
+Make sure you have finished all the previous steps, and then you can run the following script to check if all MCP servers are working properly after you set up all the above configs and deployed the app containers:
 
 ```
 bash global_preparation/check_installation_containerized.sh
@@ -168,7 +169,7 @@ We use the same script `scripts/run_single_containerized.sh` to run any task, ju
 bash scripts/run_single_containerized.sh finalpool/{taskname} quickstart {your_dump_path} {model-name}
 ```
 
-*Note: There are also other arguments in the script, please take a look at the head of it if for more information. The model name should be exactly the same as the raw name from the provider if you use **unified** model provider, otherwise, please use the alias we preset, see `utils/api_model/model_provider.py` for more details.
+*Note: There are also other arguments in the script; please take a look at the head of it for more information. The model name should be exactly the same as the raw name from the provider if you use the **unified** model provider. Otherwise, please use the alias we preset; see `utils/api_model/model_provider.py` for more details.
 
 ### Decoupled Agent Loop
 
@@ -242,7 +243,7 @@ You can run this to enable evaluation in parallel:
 ```
 bash scripts/run_parallel.sh [model-name] {your_dump_path} unified 10
 ```
-*Note: please take a look at the arguments in this script before you run. If you want to use the unified model provider, do remember to export the TOOLATHLON_OPENAI_BASE_URL and TOOLATHLON_OPENAI_API_KEY environment variables.
+*Note: please take a look at the arguments in this script before you run. If you want to use the unified model provider, remember to export the TOOLATHLON_OPENAI_BASE_URL and TOOLATHLON_OPENAI_API_KEY environment variables.
 
 *Note: make sure you restart the deployed applications (just `bash global_preparation/deploy_containers.sh [true|false]` again) each time before you launch a formal parallel evaluation.
 
