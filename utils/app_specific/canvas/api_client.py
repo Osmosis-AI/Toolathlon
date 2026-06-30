@@ -230,23 +230,26 @@ class CanvasAPI:
         params = {'per_page': 100}  # Request more items per page
         if include_deleted:
             params['include'] = ['deleted']
-        
+
         all_courses = []
-        
-        # Try user courses first
-        page = 1
-        while True:
-            params['page'] = page
-            result = self._make_request('GET', 'courses', params=params)
-            if not result or len(result) == 0:
-                break
-            all_courses.extend(result)
-            if len(result) < params['per_page']:
-                break
-            page += 1
-        
-        # If we're admin and no user courses found, try account courses
-        if len(all_courses) == 0 and account_id is not None:
+
+        # When account_id is given, query the account-courses endpoint
+        # directly.  GET /api/v1/courses only returns courses the calling
+        # user is enrolled in; for admin/preprocess flows that just
+        # created a course but did NOT enroll the admin (e.g.
+        # canvas-homework-grader-python enrolls only Teresa Torres as
+        # teacher), the user-courses list is missing the new course and
+        # the previous "fallback only when empty" logic silently skipped
+        # the account endpoint because OTHER concurrent tasks had
+        # already enrolled the admin in their courses.
+        # Pagination note: do NOT short-circuit on
+        # ``len(result) < params['per_page']`` — the local Canvas mock at
+        # port 10001 caps the actual page size at 50 regardless of the
+        # ``per_page`` query parameter.  With per_page=100 requested, the
+        # mock returns 50; that's less than 100, so the early-break would
+        # stop after page 1, silently dropping every course on page 2+.
+        # Page strictly until an empty response.
+        if account_id is not None:
             try:
                 page = 1
                 while True:
@@ -255,13 +258,22 @@ class CanvasAPI:
                     if not result or len(result) == 0:
                         break
                     all_courses.extend(result)
-                    if len(result) < params['per_page']:
-                        break
                     page += 1
-            except:
-                # Fall back to user courses if account access fails
-                pass
-        
+                return all_courses
+            except Exception:
+                # Fall through to user-courses on account access errors.
+                all_courses = []
+
+        # Non-admin path: list courses the calling user is enrolled in.
+        page = 1
+        while True:
+            params['page'] = page
+            result = self._make_request('GET', 'courses', params=params)
+            if not result or len(result) == 0:
+                break
+            all_courses.extend(result)
+            page += 1
+
         return all_courses
     
     def publish_course(self, course_id: int) -> bool:

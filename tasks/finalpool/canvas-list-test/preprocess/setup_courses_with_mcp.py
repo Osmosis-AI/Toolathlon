@@ -849,24 +849,31 @@ class CanvasCourseSetup:
         """Delete a course from Canvas"""
         try:
             async with aiohttp.ClientSession() as session:
-                # First, conclude the course (required before deletion)
+                # The local Canvas mock at port 10001 honors course
+                # conclude/delete only via the HTTP DELETE method with
+                # body {"event": "..."}.  A PUT to the same URL returns
+                # 200/204 but is silently treated as a no-op course update,
+                # leaving workflow_state unchanged — the strict readback
+                # in delete_configured_courses then flags every "deleted"
+                # course as "remaining" and preprocess fails.  Use
+                # session.delete() so the mock actually performs the action.
                 conclude_url = f"{self.base_url}/api/v1/courses/{course_id}"
                 conclude_data = {"event": "conclude"}
-                
-                async with session.put(conclude_url, headers=self.headers, json=conclude_data) as response:
+
+                async with session.delete(conclude_url, headers=self.headers, json=conclude_data) as response:
                     if 200 <= response.status < 300:
                         logger.info(f"Concluded course: {course_name} (ID: {course_id})")
                     else:
                         logger.warning(f"Failed to conclude course {course_name}: {response.status}")
-                
+
                 # Wait a moment for the conclude operation to complete
                 await asyncio.sleep(1)
-                
-                # Try to delete the course using the event parameter
+
+                # Now actually delete via DELETE method (see comment above).
                 delete_url = f"{self.base_url}/api/v1/courses/{course_id}"
                 delete_data = {"event": "delete"}
-                
-                async with session.put(delete_url, headers=self.headers, json=delete_data) as response:
+
+                async with session.delete(delete_url, headers=self.headers, json=delete_data) as response:
                     if 200 <= response.status < 300:
                         logger.info(f"Deleted course: {course_name} (ID: {course_id})")
                         return True
