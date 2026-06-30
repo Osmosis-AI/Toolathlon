@@ -242,6 +242,13 @@ class CanvasAPI:
         # the previous "fallback only when empty" logic silently skipped
         # the account endpoint because OTHER concurrent tasks had
         # already enrolled the admin in their courses.
+        # Pagination note: do NOT short-circuit on
+        # ``len(result) < params['per_page']`` — the local Canvas mock at
+        # port 10001 caps the actual page size at 50 regardless of the
+        # ``per_page`` query parameter.  With per_page=100 requested, the
+        # mock returns 50; that's less than 100, so the early-break would
+        # stop after page 1, silently dropping every course on page 2+.
+        # Page strictly until an empty response.
         if account_id is not None:
             try:
                 page = 1
@@ -251,8 +258,6 @@ class CanvasAPI:
                     if not result or len(result) == 0:
                         break
                     all_courses.extend(result)
-                    if len(result) < params['per_page']:
-                        break
                     page += 1
                 return all_courses
             except Exception:
@@ -267,8 +272,6 @@ class CanvasAPI:
             if not result or len(result) == 0:
                 break
             all_courses.extend(result)
-            if len(result) < params['per_page']:
-                break
             page += 1
 
         return all_courses
