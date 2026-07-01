@@ -59,6 +59,20 @@ import time
 _NOTION_OFFICIAL_LOCK_PATH = "./configs/.mcp-auth/notion_official_refresh.lock"
 _NOTION_OFFICIAL_LOCK_WAIT_SECONDS = 600  # 10 min cap; well under v3's 30-min setup reaper
 
+# Hard deadline for the notion_official MCP duplicate+move sequence.  When
+# mcp-remote's on-disk OAuth state is missing/corrupted (empirically observed
+# after a rotated-refresh-token race), the `async with server:` context enter
+# blocks forever inside mcp-remote's OAuth callback-wait — no browser will
+# ever visit http://localhost:9553/oauth/callback from inside a headless
+# container.  Without this deadline the whole preprocess hangs until v3's
+# 30-min SETUP_TIMEOUT fires.
+#
+# Healthy path is <60s (observed 44s on 8086 post-reauth).  OAuth-hang is
+# deterministic-forever (no browser will ever visit the localhost callback),
+# so a tight ceiling catches it quickly without wasting the setup budget.
+# 180s = 4x observed healthy, still gives margin for occasional Notion slowness.
+_NOTION_MCP_HARD_DEADLINE_SECONDS = 180.0
+
 
 async def _acquire_notion_official_lock(timeout_seconds: float = _NOTION_OFFICIAL_LOCK_WAIT_SECONDS):
     """Acquire an exclusive advisory ``flock`` on the notion_official lock
@@ -535,7 +549,8 @@ class NotionPageDuplicator:
         # be raced by a sibling task.  The lock is held from before the
         # mcp-remote subprocess starts until after it has torn down.
         lock_fd = await _acquire_notion_official_lock()
-        try:
+
+        async def _mcp_duplicate_and_move() -> str:
             notion_official_server = MCPServerManager(agent_workspace="./").servers['notion_official']
             async with notion_official_server as server:
                 res = await call_tool_with_retry(server, "notion-duplicate-page", {"page_id": child_page_id})
@@ -629,6 +644,21 @@ class NotionPageDuplicator:
 
                 if not move_successful:
                     raise Exception(f"Failed to move the page after {max_move_attempts} attempts")
+            return duplicated_page_id
+
+        try:
+            duplicated_page_id = await asyncio.wait_for(
+                _mcp_duplicate_and_move(),
+                timeout=_NOTION_MCP_HARD_DEADLINE_SECONDS,
+            )
+        except asyncio.TimeoutError as e:
+            raise RuntimeError(
+                f"notion_official MCP duplicate/move exceeded "
+                f"{_NOTION_MCP_HARD_DEADLINE_SECONDS:.0f}s — likely mcp-remote OAuth "
+                f"state (configs/.mcp-auth/mcp-remote-*/tokens.json) is corrupt or "
+                f"missing on this instance.  Reauthorize via `npx mcp-remote "
+                f"https://mcp.notion.com/mcp` and copy the new tokens.json back."
+            ) from e
         finally:
             _release_notion_official_lock(lock_fd)
         self.rename_page_via_api(duplicated_page_id, child_name)
