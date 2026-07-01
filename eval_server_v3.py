@@ -85,6 +85,29 @@ install_v3_middleware(app)
 async def _startup() -> None:
     # Reap any leftover {prefix}toolathlon-v3-* containers from a crashed run.
     reconcile_orphan_containers()
+    # Sweep stale entries from the shared github admission state file.
+    # At process boot the in-memory registry is empty, so any concurrent
+    # entry under this instance's github login is a leak from a prior
+    # ungraceful termination (SIGKILL, OOM, stop-timeout).  Reaper /
+    # normal-cleanup paths already deregister — this only catches the
+    # crash cases.
+    try:
+        from configs.token_key_session import all_token_key_session as _tks
+        _gh_token = getattr(_tks, "github_token", None)
+        if _gh_token:
+            from v3_api.github_admission import sweep_own_login_concurrent
+            login, cleared = sweep_own_login_concurrent(_gh_token)
+            if cleared:
+                print(
+                    f"[eval_server_v3] github_admission startup sweep: cleared "
+                    f"{cleared} stale concurrent entries for login={login}",
+                    flush=True,
+                )
+    except Exception as e:
+        print(
+            f"[eval_server_v3] github_admission startup sweep failed: {e!r}",
+            flush=True,
+        )
     # Start the per-execution idle/lifetime reaper.
     manager.start_reaper()
     # Force a fresh deploy_containers.sh on every service start.  No probe

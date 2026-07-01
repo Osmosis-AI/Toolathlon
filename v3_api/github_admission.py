@@ -15,8 +15,8 @@ admission boundary, so we never push GitHub harder than the policy
 allows — protecting the remaining healthy token from the same fate.
 
 Caps (single policy applied to every token-login for v0):
-  - ``MAX_CONCURRENT_HEAVY_TASKS = 3``
-        At most 3 github-heavy execs live (admitted, not yet
+  - ``MAX_CONCURRENT_HEAVY_TASKS = 5``
+        At most 5 github-heavy execs live (admitted, not yet
         cleaned-up) at any moment per token.
   - ``MAX_HEAVY_TASKS_PER_HOUR = 40``
         At most 40 github-heavy admissions in any rolling 60-min
@@ -80,7 +80,7 @@ STATE_FILE = Path(os.environ.get(
 
 # Policy caps — v0 single tier for all tokens.  Per the per-token
 # rationale at the top, callers should treat these as TOKEN-scoped.
-MAX_CONCURRENT_HEAVY_TASKS = 3
+MAX_CONCURRENT_HEAVY_TASKS = 5
 MAX_HEAVY_TASKS_PER_HOUR = 40
 # Lower than the typical-task call count (~10) so a token at 60/h
 # still gets a few admissions per reset window before refusing.
@@ -398,3 +398,46 @@ def deregister_admission(exec_id: str, token: Optional[str] = None) -> None:
                 changed = True
         if changed:
             _save_state(state, fh)
+
+
+def sweep_own_login_concurrent(token: str) -> Tuple[Optional[str], int]:
+    """Clear this instance's stale ``concurrent`` entries at startup.
+
+    At process boot the in-memory execution registry is empty, so any
+    entry present in the shared state under this instance's github
+    login is a leak from a prior ungraceful termination (SIGKILL, OOM,
+    systemd stop-timeout, kernel panic) — the normal cleanup path
+    (cleanup_execution → deregister_admission) never fired.
+
+    Safety invariant: each github PAT is used by exactly one v3
+    instance host-wide (per-instance token isolation in
+    configs/token_key_session).  If that invariant is ever violated,
+    a startup here would clear live entries owned by another instance
+    and could over-admit until the next tick.
+
+    Returns ``(login, count_cleared)``.  ``login`` is None (and count
+    is 0) if the token is missing / unresolvable / gate disabled.
+    """
+    if not token or is_disabled():
+        return None, 0
+    login = _resolve_login(token)
+    if login is None:
+        logging.warning(
+            "github_admission.sweep_own_login_concurrent: token did not "
+            "resolve to a login (auth failure?), skipping sweep"
+        )
+        return None, 0
+    with _locked_state_file() as (state, fh):
+        entry = state.get("tokens", {}).get(login)
+        if not entry:
+            return login, 0
+        concurrent = entry.get("concurrent", {})
+        n = len(concurrent)
+        if n:
+            entry["concurrent"] = {}
+            _save_state(state, fh)
+            logging.warning(
+                f"github_admission: startup sweep cleared {n} stale "
+                f"concurrent entries for login={login}"
+            )
+        return login, n
