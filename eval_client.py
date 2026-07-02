@@ -7,7 +7,7 @@ Supports both public API mode and private (local vLLM) mode.
 """
 
 # Version control
-CLIENT_VERSION = "1.2"
+CLIENT_VERSION = "1.3"
 
 import asyncio
 import json
@@ -1026,8 +1026,6 @@ def run(
                         server_version = detail.get('server_version', 'unknown')
                         typer.echo(f"\n   Server version: {server_version}", err=True)
                         typer.echo(f"   (Client version is defined at the top of eval_client.py)", err=True)
-                        typer.echo(f"\n   ⚠️  Please update your client from:", err=True)
-                        typer.echo(f"   https://github.com/hkust-nlp/Toolathlon", err=True)
 
                     # Version compatibility error
                     elif error_type == "Client version not supported":
@@ -1035,14 +1033,27 @@ def run(
                         typer.echo(f"\n   Your client version: {CLIENT_VERSION}", err=True)
                         typer.echo(f"   Supported versions: {', '.join(supported)}", err=True)
                         typer.echo(f"   (Version is defined at the top of eval_client.py)", err=True)
-                        typer.echo(f"\n   ⚠️  Please update your client from:", err=True)
-                        typer.echo(f"   https://github.com/hkust-nlp/Toolathlon", err=True)
+
+                    # WebSocket client version errors (private mode)
+                    elif error_type in {"WebSocket client version missing", "WebSocket client version not supported"}:
+                        supported = detail.get('supported_ws_client_versions', [])
+                        your_ws_version = detail.get('your_ws_client_version')
+                        if your_ws_version:
+                            typer.echo(f"\n   Your WebSocket client version: {your_ws_version}", err=True)
+                        if supported:
+                            typer.echo(f"   Supported WebSocket client versions: {', '.join(supported)}", err=True)
+                        typer.echo(f"   (WebSocket client version is defined at the top of simple_client_ws.py)", err=True)
 
                     # Workers limit error
                     elif error_type == "Workers limit exceeded":
                         max_workers = detail.get('max_workers', 'unknown')
                         typer.echo(f"\n   Server allows maximum {max_workers} workers", err=True)
                         typer.echo(f"   Please reduce --workers to {max_workers} or less", err=True)
+
+                    action = detail.get('action')
+                    if action:
+                        typer.echo(f"\n   ⚠️  Update required:", err=True)
+                        typer.echo(f"   {action}", err=True)
                 else:
                     # Simple string error
                     typer.echo(f"\n❌ Task submission failed:", err=True)

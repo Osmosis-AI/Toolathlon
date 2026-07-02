@@ -5,7 +5,7 @@ Persistent connection to Server, receive requests and process them
 """
 
 # Version control
-WS_CLIENT_VERSION = "1.2"
+WS_CLIENT_VERSION = "1.3"
 
 import asyncio
 import httpx
@@ -323,4 +323,3 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     asyncio.run(main(args.server_url, args.llm_base_url, args.llm_api_key, args.job_id))
-
