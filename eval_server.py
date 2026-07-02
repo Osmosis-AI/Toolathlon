@@ -7,9 +7,13 @@ Only one task can run at a time, with IP rate limiting (3 tasks per 24 hours).
 """
 
 # Version control
-SERVER_VERSION = "1.2"
-SUPPORTED_CLIENT_VERSIONS = ["1.2"]  # List of supported client versions
-SUPPORTED_WS_CLIENT_VERSIONS = ["1.2"]  # List of supported WS client versions
+SERVER_VERSION = "1.3"
+SUPPORTED_CLIENT_VERSIONS = ["1.3"]  # List of supported client versions
+SUPPORTED_WS_CLIENT_VERSIONS = ["1.3"]  # List of supported WS client versions
+CLIENT_UPDATE_ACTION = (
+    "Please update from https://github.com/hkust-nlp/Toolathlon and download "
+    "the latest eval client files: eval_client.py and simple_client_ws.py."
+)
 
 import asyncio
 import os
@@ -81,7 +85,7 @@ class SubmitEvaluationRequest(BaseModel):
     task_list_content: Optional[str] = None  # Task list file content (each line is a task name)
     skip_container_restart: bool = False  # Skip container restart (for debugging/testing only)
     provider: str = "unified"  # Model provider (default: "unified" for backward compatibility with v1.0 clients)
-    ws_client_version: Optional[str] = None  # WebSocket client version (required for private mode in v1.2+)
+    ws_client_version: Optional[str] = None  # WebSocket client version (required for private mode in v1.3)
 
 class SubmitEvaluationResponse(BaseModel):
     status: str
@@ -647,7 +651,7 @@ async def execute_evaluation(job_id: str, mode: str, config: Dict[str, Any]):
 async def root():
     return {
         "service": "Toolathlon Remote Evaluation Server",
-        "version": "1.0.0",
+        "version": SERVER_VERSION,
         "status": "running"
     }
 
@@ -683,7 +687,7 @@ async def submit_evaluation(request: Request, data: SubmitEvaluationRequest):
                 "error": "Client version missing",
                 "message": "Your client is too old and does not report a version number.",
                 "server_version": SERVER_VERSION,
-                "action": "Please update your client from https://github.com/hkust-nlp/Toolathlon"
+                "action": CLIENT_UPDATE_ACTION
             }
         )
 
@@ -695,7 +699,7 @@ async def submit_evaluation(request: Request, data: SubmitEvaluationRequest):
                 "error": "Client version not supported",
                 "message": f"Client version '{data.client_version}' is not compatible with server version '{SERVER_VERSION}'.",
                 "supported_versions": SUPPORTED_CLIENT_VERSIONS,
-                "action": "Please update your client from https://github.com/hkust-nlp/Toolathlon"
+                "action": CLIENT_UPDATE_ACTION
             }
         )
 
@@ -742,16 +746,16 @@ async def submit_evaluation(request: Request, data: SubmitEvaluationRequest):
             }
         )
 
-    # Validate WS client version for private mode (v1.2+)
+    # Validate WS client version for private mode (v1.3)
     if data.mode == "private":
         if data.ws_client_version is None:
             raise HTTPException(
                 status_code=400,
                 detail={
                     "error": "WebSocket client version missing",
-                    "message": "Private mode requires WebSocket client version (v1.2+). Your client files may be outdated.",
+                    "message": "Private mode requires WebSocket client version 1.3. Your client files may be outdated.",
                     "server_version": SERVER_VERSION,
-                    "action": "Please update your client files from https://github.com/hkust-nlp/Toolathlon"
+                    "action": CLIENT_UPDATE_ACTION
                 }
             )
 
@@ -763,7 +767,7 @@ async def submit_evaluation(request: Request, data: SubmitEvaluationRequest):
                     "message": f"WebSocket client version '{data.ws_client_version}' is not compatible with server version '{SERVER_VERSION}'.",
                     "your_ws_client_version": data.ws_client_version,
                     "supported_ws_client_versions": SUPPORTED_WS_CLIENT_VERSIONS,
-                    "action": "Please update simple_client_ws.py from https://github.com/hkust-nlp/Toolathlon"
+                    "action": CLIENT_UPDATE_ACTION
                 }
             )
 
@@ -1479,7 +1483,12 @@ if __name__ == "__main__":
 Toolathlon Remote Evaluation Server
 {'='*60}
 Server Version: {SERVER_VERSION}
-Supported Client Versions: {', '.join(SUPPORTED_CLIENT_VERSIONS)}
+Release: Toolathlon-Verified
+Client Requirement: Toolathlon eval client {SERVER_VERSION}
+Leaderboard: https://toolathlon.xyz/docs/leaderboard
+Release Blog: https://toolathlon.xyz/docs/blog/toolathlon-verified
+Supported API Client Versions: {', '.join(SUPPORTED_CLIENT_VERSIONS)}
+Supported WebSocket Client Versions: {', '.join(SUPPORTED_WS_CLIENT_VERSIONS)}
 Server Port: {server_port}
 WebSocket Proxy Port: {ws_proxy_port} (for private mode)
 Rate limiting: {limit_mode}

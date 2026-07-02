@@ -333,23 +333,38 @@ def get_page_by_id(page_id: str, token: str) -> Dict:
 
 def get_page_content_as_text(page_id: str, token: str) -> str:
     """Get page content as plain text with markdown-style formatting"""
-    url = f"https://api.notion.com/v1/blocks/{page_id}/children"
+    base_url = f"https://api.notion.com/v1/blocks/{page_id}/children"
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
         "Notion-Version": "2022-06-28"
     }
 
-    try:
-        response = _notion_request("GET", url, headers=headers)
-        response.raise_for_status()
-    except requests.exceptions.RequestException as e:
-        raise Exception(f"Failed to get Notion page blocks: {e}")
+    # Notion returns at most 100 children per request. Keep following
+    # next_cursor so long pages are not silently truncated.
+    all_results = []
+    cursor = None
+    while True:
+        url = base_url + (
+            f"?page_size=100&start_cursor={cursor}" if cursor else "?page_size=100"
+        )
+        try:
+            response = _notion_request("GET", url, headers=headers)
+            response.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            raise Exception(f"Failed to get Notion page blocks: {e}")
 
-    blocks = response.json()
+        blocks = response.json()
+        all_results.extend(blocks.get('results', []))
+        if not blocks.get('has_more'):
+            break
+        cursor = blocks.get('next_cursor')
+        if not cursor:
+            raise Exception("Notion page blocks response had has_more=True but no next_cursor")
+
     content_parts = []
 
-    for block in blocks.get('results', []):
+    for block in all_results:
         block_type = block.get('type', '')
 
         if block_type in ['paragraph', 'heading_1', 'heading_2', 'heading_3', 'bulleted_list_item', 'numbered_list_item']:
