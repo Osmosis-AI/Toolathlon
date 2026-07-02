@@ -1023,6 +1023,16 @@ class OpenAIResponsesModelWithRetry(OpenAIResponsesModel):
                     if any(pattern in lower_error for pattern in [
                         'maximum context length is',
                         'exceeds the context window',
+                        # Some OpenAI-Responses-compatible endpoints do not emit an
+                        # explicit context-length message. When the (server-side,
+                        # stateful) input exceeds the model's context window they
+                        # instead return only a generic invalid_request_error 400.
+                        # Treat that generic message as a context-too-long signal so
+                        # the context-reset recovery path can trigger instead of
+                        # burning through retries and hard-failing. This retry class
+                        # is only used by the stateful-responses provider, so the
+                        # blast radius of this heuristic is limited.
+                        'the request contains invalid parameters',
                     ]):
                         context_too_long = True
                         
