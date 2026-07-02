@@ -1479,6 +1479,9 @@ if __name__ == "__main__":
 Toolathlon Remote Evaluation Server
 {'='*60}
 Server Version: {SERVER_VERSION}
+Status: Upgraded to Toolathlon-Verified
+Leaderboard: https://toolathlon.xyz/docs/leaderboard
+Release Blog: https://toolathlon.xyz/docs/blog/toolathlon-verified
 Supported Client Versions: {', '.join(SUPPORTED_CLIENT_VERSIONS)}
 Server Port: {server_port}
 WebSocket Proxy Port: {ws_proxy_port} (for private mode)
