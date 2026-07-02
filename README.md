@@ -117,6 +117,10 @@ This will use our **unified** model provider (more details in `utils/api_model/m
 (Optional) We also provide some preconfigured options for you in `configs/global_configs.py` to manage all LLM APIs. You may open this file and fill in the api keys in it, and specify which provider you want to use later.
 You can find details about model providers in `utils/api_model/model_provider.py`.
 
+### Evaluation Defaults
+
+For Toolathlon-Verified, each single task has a maximum execution time of `5400` seconds. By default, each agent turn uses a `64K` maximum output length and explicitly specifies reasoning effort. We do not set other sampling parameters, such as temperature or top-p, so those values follow the upstream model provider defaults.
+
 ### Quick Example
 
 After the above two steps, we provide a very quick example here. We use *claude-sonnet-4-5* via **openrouter** in this example, so make sure you have configured TOOLATHLON_OPENAI_API_KEY and TOOLATHLON_OPENAI_BASE_URL accordingly if you want to run this script without any modification.
