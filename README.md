@@ -22,7 +22,7 @@ Toolathlon is a benchmark to assess language agents' general tool use in realist
 </div>
 
 ## News
-[2026.06.30] 🎉 Toolathlon-Verified is released. This release marks the verified final version of Toolathlon, with task prompts, ground truths, and evaluators reviewed and aligned for the final benchmark release. We have also uploaded trajectories for 6 new models to the [Toolathlon-Verified trajectories](https://huggingface.co/datasets/hkust-nlp/Toolathlon-Verified_Trajectories/tree/main) dataset on Hugging Face.
+[2026.06.30] 🎉 Toolathlon-Verified is released. This release marks the verified final version of Toolathlon, with task prompts, ground truths, and evaluators reviewed and aligned for the final benchmark release. We have also uploaded trajectories for 8 models to the [Toolathlon-Verified trajectories](https://huggingface.co/datasets/hkust-nlp/Toolathlon-Verified_Trajectories/tree/main) dataset on Hugging Face.
 
 [2025.12.12] 📣 We have set up a new documentation page for common issues and updates, please refer to [UpdateLogs_CommonIssues.md](UpdateLogs_CommonIssues.md) for more details. The document will be updated regularly to track the latest changes and issues.
 
