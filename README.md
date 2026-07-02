@@ -15,14 +15,14 @@
 </div>
 
 ## Introduction
-Toolathlon is a benchmark to assess language agents' general tool use in realistic environments. It features 600+ diverse tools based on real-world software environments. Each task requires long-horizon tool calls to complete. This repository corresponds to the Toolathlon-Verified final release. Below we show a demo task where the agent needs to automatically check assignments in the email box, and grade them on Canvas.
+Toolathlon is a benchmark to assess language agents' general tool use in realistic environments. It features 600+ diverse tools based on real-world software environments. Each task requires long-horizon tool calls to complete. This repository corresponds to the **Toolathlon-Verified** final release. Below we show a demo task where the agent needs to automatically check assignments in the email box, and grade them on Canvas.
 
 <div align="center">
   <img src="assets/demo.gif" width="100%" alt="Demo">
 </div>
 
 ## News
-[2026.06.30] 🎉 Toolathlon-Verified is released. This release marks the verified final version of Toolathlon, with task prompts, ground truths, and evaluators reviewed and aligned for the final benchmark release. We have also uploaded trajectories for 8 models to the [Toolathlon-Verified trajectories](https://huggingface.co/datasets/hkust-nlp/Toolathlon-Verified_Trajectories/tree/main) dataset on Hugging Face.
+[2026.06.30] 🎉 **Toolathlon-Verified** is released. This release marks the verified final version of Toolathlon, with task prompts, ground truths, and evaluators reviewed and aligned for the final benchmark release. We have also uploaded trajectories for 8 models to the [**Toolathlon-Verified** trajectories](https://huggingface.co/datasets/hkust-nlp/Toolathlon-Verified_Trajectories/tree/main) dataset on Hugging Face.
 
 [2025.12.12] 📣 We have set up a new documentation page for common issues and updates, please refer to [UpdateLogs_CommonIssues.md](UpdateLogs_CommonIssues.md) for more details. The document will be updated regularly to track the latest changes and issues.
 
@@ -119,7 +119,7 @@ You can find details about model providers in `utils/api_model/model_provider.py
 
 ### Evaluation Defaults
 
-For Toolathlon-Verified, each single task has a maximum execution time of `5400` seconds. By default, each agent turn uses a `64K` maximum output length and explicitly specifies reasoning effort. We do not set other sampling parameters, such as temperature or top-p, so those values follow the upstream model provider defaults.
+For **Toolathlon-Verified**, each single task has a maximum execution time of `5400` seconds. By default, each agent turn uses a `64K` maximum output length and explicitly specifies reasoning effort. We do not set other sampling parameters, such as temperature or top-p, so those values follow the upstream model provider defaults.
 
 ### Quick Example
 
