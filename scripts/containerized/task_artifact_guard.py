@@ -43,9 +43,57 @@ PROTECTED_DIRECTORIES = (
     "preprocess",
     "evaluation",
     "groundtruth_workspace",
+    # Per-task subdir that leaks the answer:
+    "golden",  # oil-price: contains golden/main.py — the reference
+               # implementation script the grader cites as "source of
+               # truth" for backtest computation.
 )
 REQUIRED_DIRECTORIES = frozenset({"evaluation"})
-PROTECTED_EXACT_FILES = frozenset({"gt_record.md", "expected_results.json"})
+PROTECTED_EXACT_FILES = frozenset({
+    "gt_record.md",
+    "expected_results.json",
+    # ── Newly identified task-root leaks (audited 2026-06-30 on the
+    # v3 branch; porting equivalents here) ──
+    #
+    # Snapshot files at task root that carry the expected answer
+    # in plain text (same shape as expected_results.json):
+    "setup_results.json",                     # woocommerce-new-product
+    "recalled_products_info.json",            # woocommerce-product-recall
+    "test_customers_info.json",               # woocommerce-product-recall
+    # Author scripts whose code IS the answer — the agent could read
+    # the expected output or even run the generator:
+    "create_excel_report.py",                 # canvas-submit-late-work
+    "send_reminder_emails.py",                # canvas-submit-late-work
+    "generate_groundtruth.py",                # sales-accounting
+    "build_excel_ledger.py",                  # sales-accounting
+    "verify_groundtruth.py",                  # sync-todo-to-readme
+    "generate_initial_excel.py",              # woocommerce-stock-alert
+    # Test files at task root that bake in pass/fail oracles:
+    "test_evaluation.py",                     # paper-checker
+    "test_evaluation_enhanced.py",            # paper-checker
+    "test_enhanced_evaluation.py",            # game-statistics
+    "test_check_local.py",                    # reimbursement-form-filler
+    "test_integration.py",                    # woocommerce-customer-survey
+    # Author notes / solution outlines at task root:
+    "readme_xiaochen.md",                     # canvas-do-quiz (validates a
+                                              # specific quiz answer)
+    "guide.md",                               # ipad-edu-price (literal
+                                              # 4-step solution outline);
+                                              # SAFE for yahoo-analysis which
+                                              # has guide.md at
+                                              # initial_workspace/guide.md —
+                                              # only direct children of the
+                                              # task root are inspected.
+    "restructure_summary.md",                 # excel-data-transformation
+    "evaluation_enhancement_report.md",       # paper-checker
+    "note.md",                                # personal-website-construct
+    # Side-output of a stashed generator script — has the expected
+    # shape + populated stock-alert records:
+    "stock_alerts_initial.xlsx",              # woocommerce-stock-alert
+    # Author dev artifacts at task root with no agent runtime use:
+    "convert_to_backup.py",                   # apply-phd-email
+    "station_english_name.txt",               # train-ticket-plan
+})
 PROTECTED_CASEFOLD_FILES = frozenset({"readme.md"})
 
 _CONTAINER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
