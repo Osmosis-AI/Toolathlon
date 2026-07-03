@@ -117,11 +117,13 @@ PERIODIC_RESET_INTERVAL_SECONDS = int(
 # force-delete every remaining execution and proceed to ``repairing``.
 # Without this cap, a single long-running task can hold the whole periodic
 # reset for its full lifetime (~90 min) — starving newer arrivals of a
-# fresh shared-infra reset for over an hour.  10 min gives well-behaved
-# rollouts room to complete their grade call, while capping the worst case.
+# fresh shared-infra reset for over an hour.  30 min gives long-running
+# rollouts (task-tracker etc. routinely take 60–80 min but often complete
+# late in the drain window) time to finish naturally, while still capping
+# the worst case well below the 90-min lifetime.
 DRAIN_TIMEOUT_SECONDS = int(
-    os.environ.get("TOOLATHLON_V3_DRAIN_TIMEOUT_SECONDS", "600")
-)  # 10 min default
+    os.environ.get("TOOLATHLON_V3_DRAIN_TIMEOUT_SECONDS", "1800")
+)  # 30 min default
 INFRA_RETRY_AFTER_SECONDS = float(os.environ.get("TOOLATHLON_V3_INFRA_RETRY_AFTER_SECONDS", "30"))
 
 
