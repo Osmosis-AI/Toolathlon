@@ -460,6 +460,30 @@ async def run_command_async(cmd: list, env: dict, log_file: str):
         )
         return process
 
+async def notify_ws_proxy_job_ended(job_id: str, reason: str):
+    """Best-effort notification that releases the private-mode WebSocket slot."""
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.post(
+                f"http://127.0.0.1:{WS_PROXY_PORT}/internal/disconnect_job",
+                params={"job_id": job_id, "reason": reason}
+            )
+
+        if response.status_code != 200:
+            log(f"[Server] Warning: WebSocket proxy rejected cleanup for job {job_id} (HTTP {response.status_code})")
+            return
+
+        result = response.json()
+        if result.get("disconnected"):
+            log(f"[Server] Released WebSocket client for terminal job {job_id} ({reason})")
+        elif result.get("reason") not in {"no_client_connected", "different_job_connected"}:
+            log(f"[Server] Warning: WebSocket proxy did not release job {job_id}: {result}")
+    except Exception as e:
+        # Cleanup notification must never change the evaluation's terminal state.
+        log(f"[Server] Warning: Could not notify WebSocket proxy that job {job_id} ended: {e}")
+
 # ===== Background Task Executor =====
 
 async def execute_evaluation(job_id: str, mode: str, config: Dict[str, Any]):
@@ -587,6 +611,9 @@ async def execute_evaluation(job_id: str, mode: str, config: Dict[str, Any]):
                     current_job["error"] = f"Task exceeded {TIMEOUT_SECONDS//60} minutes"
                 log(f"[Server] Job {job_id} timed out after {elapsed//60:.1f} minutes")
 
+                if mode == "private":
+                    await notify_ws_proxy_job_ended(job_id, "timeout")
+
                 # Record completion time and duration
                 record_job_completion(job_id, client_ip, start_timestamp)
 
@@ -623,6 +650,9 @@ async def execute_evaluation(job_id: str, mode: str, config: Dict[str, Any]):
             current_job["status"] = "completed"
         log(f"[Server] Job {job_id} completed successfully")
 
+        if mode == "private":
+            await notify_ws_proxy_job_ended(job_id, "completed")
+
         # Record completion time and duration
         record_job_completion(job_id, client_ip, start_timestamp)
 
@@ -635,6 +665,9 @@ async def execute_evaluation(job_id: str, mode: str, config: Dict[str, Any]):
             current_job["status"] = "failed"
             current_job["error"] = error_msg
         log(f"[Server] Job {job_id} failed: {error_msg}")
+
+        if mode == "private":
+            await notify_ws_proxy_job_ended(job_id, "failed")
 
         # Record completion time and duration
         record_job_completion(job_id, client_ip, start_timestamp)
@@ -946,8 +979,13 @@ async def validate_job(job_id: str, request: Request):
     if client_host not in ["127.0.0.1", "localhost", "::1"]:
         raise HTTPException(status_code=403, detail="Access denied: localhost only")
 
-    # Check if this job_id matches the current running job
-    if current_job and current_job.get("job_id") == job_id:
+    # A retained terminal job is available for result retrieval, but must no
+    # longer authenticate or retain a WebSocket client.
+    if (
+        current_job
+        and current_job.get("job_id") == job_id
+        and current_job.get("status") == "running"
+    ):
         return {
             "valid": True,
             "job_id": job_id,
@@ -957,6 +995,7 @@ async def validate_job(job_id: str, request: Request):
     else:
         return {
             "valid": False,
+            "status": current_job.get("status") if current_job and current_job.get("job_id") == job_id else "not_found",
             "message": "No active job with this ID"
         }
 
@@ -1095,6 +1134,9 @@ async def cancel_job(job_id: str):
         log(f"[Server] Warning: Failed to clean up {container_runtime} containers: {e}")
 
     current_job["status"] = "cancelled"
+
+    if current_job.get("mode") == "private":
+        await notify_ws_proxy_job_ended(job_id, "cancelled")
 
     # Record completion time and duration (for cancelled jobs)
     record_job_completion(job_id, current_job["client_ip"], current_job["start_timestamp"])
