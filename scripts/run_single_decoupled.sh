@@ -678,6 +678,20 @@ if [ -z "$CURRENT_CONTAINER_BUNDLE" ]; then
     exit 1
 fi
 
+# Owner of the bind-mounted output tree as seen from inside the container's
+# user namespace: the invoking host user on rootful Docker/Podman, container
+# root under rootless Podman. Captured before preprocess (which runs as
+# container root) so ownership can be restored afterwards.
+if ! DUMPS_OWNER=$($CONTAINER_RUNTIME exec "$CONTAINER_NAME" \
+    stat -c '%u:%g' /workspace/dumps); then
+    echo "✗ Could not determine output ownership inside the container" >&2
+    exit 1
+fi
+if [[ ! "$DUMPS_OWNER" =~ ^[0-9]+:[0-9]+$ ]]; then
+    echo "✗ Invalid output ownership reported by container: $DUMPS_OWNER" >&2
+    exit 1
+fi
+
 PREPROCESS_ARGS=(
     uv run python -m scripts.decoupled.container_preprocess
     --eval_config "$eval_config"
@@ -708,13 +722,11 @@ if [ $PREPROCESS_EXIT_CODE -ne 0 ]; then
 fi
 echo "✓ Preprocess completed"
 
-# Preprocess runs as root in the task image, while the decoupled agent loop
-# runs as the invoking host user. Hand ownership of the bind-mounted output
-# tree back before the host process writes status and trajectory files.
-HOST_UID=$(id -u)
-HOST_GID=$(id -g)
+# Preprocess runs as container root. Restore the output tree to its
+# pre-preprocess owner in the container's user namespace, preserving host
+# writability under both rootful runtimes and rootless Podman.
 if ! $CONTAINER_RUNTIME exec "$CONTAINER_NAME" \
-    chown -R -- "$HOST_UID:$HOST_GID" /workspace/dumps; then
+    chown -R -- "$DUMPS_OWNER" /workspace/dumps; then
     echo "✗ Failed to hand output ownership to the host agent" >&2
     exit 1
 fi
