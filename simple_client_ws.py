@@ -321,9 +321,11 @@ if __name__ == "__main__":
     parser.add_argument("--llm-base-url", required=True, help="Real LLM base URL (e.g., https://api.deepseek.com/v1)")
     parser.add_argument(
         "--llm-api-key",
-        default=os.environ.get("TOOLATHLON_OPENAI_API_KEY"),
-        required="TOOLATHLON_OPENAI_API_KEY" not in os.environ,
-        help="Real LLM API key; defaults to TOOLATHLON_OPENAI_API_KEY",
+        default=os.environ.get(
+            "TOOLATHLON_OPENAI_API_KEY", os.environ.get("OPENAI_API_KEY", "")
+        ),
+        help="Real LLM API key; defaults to TOOLATHLON_OPENAI_API_KEY, then "
+             "OPENAI_API_KEY, then empty for endpoints without authentication",
     )
     parser.add_argument("--job-id", required=False, help="Job ID for authentication (required by server)")
 

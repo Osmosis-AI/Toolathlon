@@ -730,7 +730,7 @@ def run(
     ),
     api_key: Optional[str] = typer.Option(
         None,
-        help="API key for authentication. It is required for public mode, and ignored for private mode. So in private mode please set OPENAI_API_KEY environment variable if your endpoint requires it."
+        help="API key for authentication. It is required for public mode. In private mode it is not sent to the evaluation server; it is forwarded to the local WebSocket client, which otherwise falls back to the TOOLATHLON_OPENAI_API_KEY or OPENAI_API_KEY environment variable."
     ),
     workers: int = typer.Option(
         10,
