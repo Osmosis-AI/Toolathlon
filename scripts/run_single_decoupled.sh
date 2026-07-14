@@ -708,6 +708,17 @@ if [ $PREPROCESS_EXIT_CODE -ne 0 ]; then
 fi
 echo "✓ Preprocess completed"
 
+# Preprocess runs as root in the task image, while the decoupled agent loop
+# runs as the invoking host user. Hand ownership of the bind-mounted output
+# tree back before the host process writes status and trajectory files.
+HOST_UID=$(id -u)
+HOST_GID=$(id -g)
+if ! $CONTAINER_RUNTIME exec "$CONTAINER_NAME" \
+    chown -R -- "$HOST_UID:$HOST_GID" /workspace/dumps; then
+    echo "✗ Failed to hand output ownership to the host agent" >&2
+    exit 1
+fi
+
 if ! $CONTAINER_RUNTIME cp \
     "$CONTAINER_NAME:$CURRENT_CONTAINER_BUNDLE" \
     "$TRUSTED_BUNDLE_FILE"; then
