@@ -4,6 +4,7 @@ from pathlib import Path
 
 
 SCRIPT_PATH = Path(__file__).resolve().parents[2] / "run_single_decoupled.sh"
+HOST_LOOP_PATH = Path(__file__).resolve().parents[1] / "host_agent_loop.py"
 RUN_PARALLEL_PATH = Path(__file__).resolve().parents[3] / "run_parallel.py"
 
 
@@ -11,6 +12,7 @@ class DecoupledIsolationRunnerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.script = SCRIPT_PATH.read_text(encoding="utf-8")
+        cls.host_loop = HOST_LOOP_PATH.read_text(encoding="utf-8")
         cls.parallel_runner = RUN_PARALLEL_PATH.read_text(encoding="utf-8")
 
     def position(self, needle: str, start: int = 0) -> int:
@@ -20,7 +22,11 @@ class DecoupledIsolationRunnerTests(unittest.TestCase):
 
     def test_artifacts_are_hidden_before_gateway_and_restored_before_eval(self) -> None:
         preprocess_done = self.position('echo "✓ Preprocess completed"')
-        stash = self.position("task_artifact_guard stash", preprocess_done)
+        ownership_handoff = self.position(
+            'chown -R -- "$HOST_UID:$HOST_GID" /workspace/dumps',
+            preprocess_done,
+        )
+        stash = self.position("task_artifact_guard stash", ownership_handoff)
         gateway = self.position("# Step 4: Start single-port gateway", stash)
         host_exit = self.position("HOST_LOOP_EXIT_CODE=$?", gateway)
         restore = self.position("task_artifact_guard restore", host_exit)
@@ -29,7 +35,8 @@ class DecoupledIsolationRunnerTests(unittest.TestCase):
         )
         evaluation = self.position("# Step 6: Container evaluation", remove_fake_eval)
 
-        self.assertLess(preprocess_done, stash)
+        self.assertLess(preprocess_done, ownership_handoff)
+        self.assertLess(ownership_handoff, stash)
         self.assertLess(stash, gateway)
         self.assertLess(host_exit, restore)
         self.assertLess(restore, remove_fake_eval)
@@ -73,6 +80,36 @@ class DecoupledIsolationRunnerTests(unittest.TestCase):
         self.assertNotIn(
             "--bundle_file /workspace/dumps/task_bundle.json", self.script
         )
+
+    def test_local_only_runner_keeps_host_secrets_and_control_planes_out(self) -> None:
+        self.assertNotIn(
+            'TOOLATHLON_OPENAI_API_KEY=${TOOLATHLON_OPENAI_API_KEY}',
+            self.script,
+        )
+        self.assertNotIn(
+            'CONTAINER_MODEL_ENV_ARGS+=("-e" "TOOLATHLON_OPENAI_API_KEY")',
+            self.script,
+        )
+        self.assertIn("keeping it host-side only", self.script)
+        self.assertIn('"--network" "bridge"', self.script)
+        self.assertIn(
+            '"-p" "127.0.0.1:${gateway_port}:${gateway_port}"', self.script
+        )
+        self.assertIn('if [ "$NEEDS_K8S" = "true" ]; then', self.script)
+        self.assertIn(
+            'if [ "$NEEDS_NOTION_AUTH" = "true" ]; then', self.script
+        )
+        self.assertIn(
+            "Skipping Google/mail credential setup for local-only task",
+            self.script,
+        )
+        self.assertIn("! -name 'global_configs.py'", self.script)
+        self.assertIn("--host $GATEWAY_BIND_HOST", self.script)
+
+        ignored_tools_start = self.host_loop.index("IGNORED_LOCAL_TOOLS = {")
+        ignored_tools_end = self.host_loop.index("}", ignored_tools_start)
+        ignored_tools = self.host_loop[ignored_tools_start:ignored_tools_end]
+        self.assertIn('"python_execute"', ignored_tools)
 
     def test_task_copy_and_cleanup_are_collision_safe(self) -> None:
         copy_task = self.position(

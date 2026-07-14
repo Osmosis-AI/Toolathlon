@@ -30,7 +30,7 @@ class HostAgentLoopHelperTests(unittest.TestCase):
             "web_search",
         ]
         filtered = filter_local_tools(tools)
-        self.assertEqual(filtered, ["python_execute", "web_search"])
+        self.assertEqual(filtered, ["web_search"])
 
     def test_expand_stop_tool_names_adds_gateway_prefix(self) -> None:
         expanded = expand_stop_tool_names(["local-claim_done", "local-custom"], "gw")

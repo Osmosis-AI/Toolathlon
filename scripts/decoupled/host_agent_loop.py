@@ -25,7 +25,16 @@ from utils.openai_agents_monkey_patch.custom_run_impl import *
 from utils.openai_agents_monkey_patch.custom_mcp_util import *
 
 
-IGNORED_LOCAL_TOOLS = {"manage_context", "history", "handle_overlong_tool_outputs", "claim_done"}
+# In decoupled mode, model-executable tools must stay behind the container
+# gateway. The terminal MCP already provides workspace-scoped Python execution;
+# exposing python_execute here would run model-authored code on the host.
+IGNORED_LOCAL_TOOLS = {
+    "manage_context",
+    "history",
+    "handle_overlong_tool_outputs",
+    "claim_done",
+    "python_execute",
+}
 ANSI_RESET = "\033[0m"
 ANSI_BOLD = "\033[1m"
 ANSI_DIM = "\033[2m"

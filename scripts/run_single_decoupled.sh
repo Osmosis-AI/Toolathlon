@@ -218,7 +218,39 @@ CONTAINER_NAME="${INSTANCE_PREFIX}toolathlon-${SAFE_TASK_NAME}-${TIMESTAMP}"
 
 echo "Container name: $CONTAINER_NAME"
 
-EXTRA_ENV_ARGS=()
+# Resolve the task's capability boundary before constructing the container.
+# The local-only path is intentionally narrow: it is used for tasks whose MCP
+# servers operate entirely on the copied task workspace and therefore need no
+# host application credentials, host network, or container-runtime socket.
+TASK_SOURCE="$PROJECT_ROOT/tasks/$task_dir_arg"
+if [ ! -d "$TASK_SOURCE" ]; then
+    echo "Error: Task directory does not exist: $TASK_SOURCE"
+    exit 1
+fi
+if [ ! -f "$TASK_SOURCE/task_config.json" ]; then
+    echo "Error: Task config does not exist: $TASK_SOURCE/task_config.json"
+    exit 1
+fi
+
+read -r LOCAL_ONLY_TASK NEEDS_K8S NEEDS_NOTION_AUTH < <(
+    uv run python -c '
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as task_config_file:
+    servers = set(json.load(task_config_file).get("needed_mcp_servers", []))
+
+local_only_servers = {"filesystem", "terminal", "pdf-tools", "excel"}
+print(
+    str(servers <= local_only_servers).lower(),
+    str("k8s" in servers).lower(),
+    str("notion" in servers).lower(),
+)
+' "$TASK_SOURCE/task_config.json"
+)
+echo "Local-only task boundary: $LOCAL_ONLY_TASK"
+
+CONTAINER_MODEL_ENV_ARGS=()
 USE_UNIFIED_MODEL_ENV=true
 case "$host_loop_backend" in
     claude|claude_sdk|claude_agent_sdk)
@@ -228,13 +260,17 @@ esac
 
 if [ "$USE_UNIFIED_MODEL_ENV" = true ]; then
     if [ ! -z "${TOOLATHLON_OPENAI_BASE_URL+x}" ]; then
-        EXTRA_ENV_ARGS+=("-e" "TOOLATHLON_OPENAI_BASE_URL=${TOOLATHLON_OPENAI_BASE_URL}")
-        echo "Detected host TOOLATHLON_OPENAI_BASE_URL, will pass into container"
+        # The non-secret endpoint is needed while preprocess resolves the
+        # provider. Pass only its environment-variable name so it is not
+        # rendered into the printed docker command.
+        CONTAINER_MODEL_ENV_ARGS+=("-e" "TOOLATHLON_OPENAI_BASE_URL")
+        echo "Detected host TOOLATHLON_OPENAI_BASE_URL; passing non-secret endpoint by name"
     fi
 
     if [ ! -z "${TOOLATHLON_OPENAI_API_KEY+x}" ]; then
-        EXTRA_ENV_ARGS+=("-e" "TOOLATHLON_OPENAI_API_KEY=${TOOLATHLON_OPENAI_API_KEY}")
-        echo "Detected host TOOLATHLON_OPENAI_API_KEY, will pass into container"
+        # Model inference happens in scripts.decoupled.host_agent_loop. Never
+        # inject its key into the third-party task image.
+        echo "Detected host TOOLATHLON_OPENAI_API_KEY; keeping it host-side only"
     fi
 else
     echo "Skipping TOOLATHLON_OPENAI_* passthrough for Claude SDK host loop"
@@ -298,13 +334,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Verify task directory exists
-TASK_SOURCE="$PROJECT_ROOT/tasks/$task_dir_arg"
-if [ ! -d "$TASK_SOURCE" ]; then
-    echo "Error: Task directory does not exist: $TASK_SOURCE"
-    exit 1
-fi
-
 # Prepare list of files to copy to container
 echo "Preparing project files..."
 
@@ -354,49 +383,66 @@ START_CONTAINER_ARGS=(
     "$CONTAINER_RUNTIME" "run"
     "-d"  # Run in background
     "--name" "$CONTAINER_NAME"
-    "--network" "host" # Use host network for Kind cluster access
 )
 
-# Add environment variables for TOOLATHLON_OPENAI from host
-for envarg in "${EXTRA_ENV_ARGS[@]}"; do
+GATEWAY_BIND_HOST="127.0.0.1"
+if [ "$LOCAL_ONLY_TASK" = "true" ]; then
+    # Publish only the MCP gateway, and only on host loopback. The task
+    # container receives ordinary bridge networking for package access but no
+    # access to host-network listeners.
+    START_CONTAINER_ARGS+=(
+        "--network" "bridge"
+        "-p" "127.0.0.1:${gateway_port}:${gateway_port}"
+    )
+    GATEWAY_BIND_HOST="0.0.0.0"
+    echo "Using isolated bridge network with loopback-only gateway publishing"
+else
+    START_CONTAINER_ARGS+=("--network" "host")
+    echo "Using host network for task services"
+fi
+
+# Pass only non-secret model-provider metadata. The host process retains the
+# API credential used for inference.
+for envarg in "${CONTAINER_MODEL_ENV_ARGS[@]}"; do
     START_CONTAINER_ARGS+=("$envarg")
 done
 
-# Add socket mount based on container runtime
-if [ "$CONTAINER_RUNTIME" = "podman" ]; then
-    echo "Configuring Podman environment..."
-    PODMAN_SOCKET_FOUND=false
+# A runtime socket grants host-level container control. Mount it only for
+# tasks that explicitly declare the k8s MCP server.
+if [ "$NEEDS_K8S" = "true" ]; then
+    if [ "$CONTAINER_RUNTIME" = "podman" ]; then
+        echo "Configuring Podman environment for declared k8s task..."
+        PODMAN_SOCKET_FOUND=false
 
-    # 1. Check system-level podman socket
-    if [ -S "/run/podman/podman.sock" ]; then
-        START_CONTAINER_ARGS+=(
-            "-v" "/run/podman/podman.sock:/run/podman/podman.sock"
-        )
-        echo "Using system-level podman socket: /run/podman/podman.sock"
-        PODMAN_SOCKET_FOUND=true
-    # 2. Check user-level podman socket
-    elif [ -S "/run/user/$(id -u)/podman/podman.sock" ]; then
-        START_CONTAINER_ARGS+=(
-            "-v" "/run/user/$(id -u)/podman/podman.sock:/run/podman/podman.sock"
-        )
-        echo "Using user-level podman socket: /run/user/$(id -u)/podman/podman.sock"
-        PODMAN_SOCKET_FOUND=true
-    fi
+        if [ -S "/run/podman/podman.sock" ]; then
+            START_CONTAINER_ARGS+=(
+                "-v" "/run/podman/podman.sock:/run/podman/podman.sock"
+            )
+            echo "Using system-level podman socket: /run/podman/podman.sock"
+            PODMAN_SOCKET_FOUND=true
+        elif [ -S "/run/user/$(id -u)/podman/podman.sock" ]; then
+            START_CONTAINER_ARGS+=(
+                "-v" "/run/user/$(id -u)/podman/podman.sock:/run/podman/podman.sock"
+            )
+            echo "Using user-level podman socket: /run/user/$(id -u)/podman/podman.sock"
+            PODMAN_SOCKET_FOUND=true
+        fi
 
-    if [ "$PODMAN_SOCKET_FOUND" = false ]; then
-        echo "Warning: Podman socket not found, Kind may not work"
-        echo "Tip: Please manually run 'systemctl --user start podman.socket' or 'sudo systemctl start podman.socket'"
+        if [ "$PODMAN_SOCKET_FOUND" = false ]; then
+            echo "Warning: Podman socket not found, Kind may not work"
+            echo "Tip: Please manually run 'systemctl --user start podman.socket' or 'sudo systemctl start podman.socket'"
+        fi
+        START_CONTAINER_ARGS+=(
+            "-e" "KIND_EXPERIMENTAL_PROVIDER=podman"
+        )
+    elif [ "$CONTAINER_RUNTIME" = "docker" ]; then
+        echo "Configuring Docker environment for declared k8s task..."
+        START_CONTAINER_ARGS+=(
+            "-v" "/var/run/docker.sock:/var/run/docker.sock"
+        )
     fi
-    # Set env variable for Kind to use Podman
-    START_CONTAINER_ARGS+=(
-        "-e" "KIND_EXPERIMENTAL_PROVIDER=podman"
-    )
-elif [ "$CONTAINER_RUNTIME" = "docker" ]; then
-    echo "Configuring Docker environment..."
-    # Docker socket mount
-    START_CONTAINER_ARGS+=(
-        "-v" "/var/run/docker.sock:/var/run/docker.sock"
-    )
+else
+    echo "Skipping container-runtime socket: task does not declare k8s"
 fi
 
 # if output_folder is not a absolute path, make it absolute
@@ -419,25 +465,22 @@ eval_log_path="${output_folder}/eval.log"
 # this run cannot accidentally expose a stale evaluator configuration.
 rm -rf -- "$output_folder/task_bundle.json"
 
-# Bind-mount the host's configs/.mcp-auth so OAuth-refresh writes from
-# mcp-remote inside the container persist back to host disk.  Notion's
-# OAuth refresh_token rotates on every use; without this, the rotated
-# token would die with the container and the next container would
-# read a stale (now-invalidated) token and fail with "Grant not found".
-# The mount path matches MCP_REMOTE_CONFIG_DIR in
-# configs/mcp_servers/notion_official.yaml ("./configs/.mcp-auth", which
-# resolves to /workspace/configs/.mcp-auth inside the container).
-mkdir -p "$PROJECT_ROOT/configs/.mcp-auth"
-START_CONTAINER_ARGS+=(
-    "-v" "$PROJECT_ROOT/configs/.mcp-auth:/workspace/configs/.mcp-auth"
-)
-
-# Overlay the pinned Notion MCP's restrictive OpenAPI schema at runtime.
-NOTION_OPENAPI_PATCH="$PROJECT_ROOT/configs/notion-mcp-patches/notion-openapi.json"
-if [ -f "$NOTION_OPENAPI_PATCH" ]; then
+# Bind external-app authentication only when the task explicitly declares
+# Notion. Local-only tasks must not receive any host OAuth state.
+if [ "$NEEDS_NOTION_AUTH" = "true" ]; then
+    mkdir -p "$PROJECT_ROOT/configs/.mcp-auth"
     START_CONTAINER_ARGS+=(
-        "-v" "$NOTION_OPENAPI_PATCH:/workspace/node_modules/@notionhq/notion-mcp-server/scripts/notion-openapi.json:ro"
+        "-v" "$PROJECT_ROOT/configs/.mcp-auth:/workspace/configs/.mcp-auth"
     )
+
+    NOTION_OPENAPI_PATCH="$PROJECT_ROOT/configs/notion-mcp-patches/notion-openapi.json"
+    if [ -f "$NOTION_OPENAPI_PATCH" ]; then
+        START_CONTAINER_ARGS+=(
+            "-v" "$NOTION_OPENAPI_PATCH:/workspace/node_modules/@notionhq/notion-mcp-server/scripts/notion-openapi.json:ro"
+        )
+    fi
+else
+    echo "Skipping host MCP auth mounts: task does not declare Notion"
 fi
 
 # Add mounts
@@ -530,12 +573,33 @@ for item in "${FILES_TO_COPY[@]}"; do
         echo "  Copying $item to container..."
         if [ -d "$PROJECT_ROOT/$item" ]; then
             $CONTAINER_RUNTIME exec "$CONTAINER_NAME" mkdir -p "/workspace/$item"
-            if [ "$item" = "configs" ] && [ -d "$PROJECT_ROOT/configs/.mcp-auth" ]; then
+            if [ "$item" = "configs" ]; then
                 _stage=$(mktemp -d)
-                (
-                    cd "$PROJECT_ROOT/configs" && \
-                    find . -mindepth 1 -maxdepth 1 ! -name '.mcp-auth' -exec cp -a {} "$_stage/" \;
-                )
+                if [ "$LOCAL_ONLY_TASK" = "true" ]; then
+                    # Copy MCP definitions and non-secret runtime metadata, but
+                    # replace local config files with their checked-in
+                    # placeholder examples. Do not expose unrelated app auth.
+                    (
+                        cd "$PROJECT_ROOT/configs" && \
+                        find . -mindepth 1 -maxdepth 1 \
+                            ! -name '.mcp-auth' \
+                            ! -name 'global_configs.py' \
+                            ! -iname '*credential*' \
+                            ! -iname '*oauth*' \
+                            ! -iname '*token*' \
+                            ! -iname '*key*' \
+                            ! -iname '*user*' \
+                            ! -iname '*email*' \
+                            -exec cp -a {} "$_stage/" \;
+                    )
+                    cp "$PROJECT_ROOT/configs/global_configs_example.py" "$_stage/global_configs.py"
+                    cp "$PROJECT_ROOT/configs/token_key_session_example.py" "$_stage/token_key_session.py"
+                else
+                    (
+                        cd "$PROJECT_ROOT/configs" && \
+                        find . -mindepth 1 -maxdepth 1 ! -name '.mcp-auth' -exec cp -a {} "$_stage/" \;
+                    )
+                fi
                 $CONTAINER_RUNTIME cp "$_stage/." "$CONTAINER_NAME:/workspace/$item/"
                 rm -rf "$_stage"
             else
@@ -577,55 +641,66 @@ fi
 echo ""
 echo "Step 2.6: Executing necessary configurations..."
 echo " Executing necessary configurations"
-copy_config_cmd='
-  for dir in ~/.gmail-mcp ~/.calendar-mcp; do
-    mkdir -p $dir
-    cp ./configs/gcp-oauth.keys.json $dir/
-    cp ./configs/google_credentials.json $dir/credentials.json
-  done
-'
-if [ "$runmode" = "quickstart" ]; then
-    $CONTAINER_RUNTIME exec "$CONTAINER_NAME" bash -c "$copy_config_cmd" || echo "Warning: Failed to copy config files, but continuing due to quickstart mode"
+if [ "$LOCAL_ONLY_TASK" = "true" ]; then
+    echo "Skipping Google/mail credential setup for local-only task"
 else
-    $CONTAINER_RUNTIME exec "$CONTAINER_NAME" bash -c "$copy_config_cmd"
+    copy_config_cmd='
+      for dir in ~/.gmail-mcp ~/.calendar-mcp; do
+        mkdir -p $dir
+        cp ./configs/gcp-oauth.keys.json $dir/
+        cp ./configs/google_credentials.json $dir/credentials.json
+      done
+    '
+    if [ "$runmode" = "quickstart" ]; then
+        $CONTAINER_RUNTIME exec "$CONTAINER_NAME" bash -c "$copy_config_cmd" || echo "Warning: Failed to copy config files, but continuing due to quickstart mode"
+    else
+        $CONTAINER_RUNTIME exec "$CONTAINER_NAME" bash -c "$copy_config_cmd"
+    fi
 fi
 
-# Copy MCP auth directory if it exists (prefer ./configs/.mcp-auth over ~/.mcp-auth)
-if [ -d "$PROJECT_ROOT/configs/.mcp-auth" ]; then
-    echo " Using bind-mounted MCP authentication data from ./configs/.mcp-auth"
-elif [ -d "$HOME/.mcp-auth" ]; then
-    echo " ./configs/.mcp-auth not found, falling back to ~/.mcp-auth..."
-    echo " Copying MCP authentication data from ~/.mcp-auth to container..."
-    $CONTAINER_RUNTIME exec "$CONTAINER_NAME" mkdir -p /root/.mcp-auth
-    $CONTAINER_RUNTIME cp "$HOME/.mcp-auth/." "$CONTAINER_NAME:/root/.mcp-auth/"
-    echo "✓ MCP auth data copied from home directory"
+# Copy MCP auth only for a task that explicitly declares Notion.
+if [ "$NEEDS_NOTION_AUTH" = "true" ]; then
+    if [ -d "$PROJECT_ROOT/configs/.mcp-auth" ]; then
+        echo " Using bind-mounted MCP authentication data from ./configs/.mcp-auth"
+    elif [ -d "$HOME/.mcp-auth" ]; then
+        echo " ./configs/.mcp-auth not found, falling back to ~/.mcp-auth..."
+        echo " Copying MCP authentication data from ~/.mcp-auth to container..."
+        $CONTAINER_RUNTIME exec "$CONTAINER_NAME" mkdir -p /root/.mcp-auth
+        $CONTAINER_RUNTIME cp "$HOME/.mcp-auth/." "$CONTAINER_NAME:/root/.mcp-auth/"
+        echo "✓ MCP auth data copied from home directory"
+    else
+        echo " Warning: MCP auth not found in ./configs/.mcp-auth or ~/.mcp-auth, skipping MCP auth copy"
+    fi
 else
-    echo " Warning: MCP auth not found in ./configs/.mcp-auth or ~/.mcp-auth, skipping MCP auth copy"
+    echo "Skipping MCP auth copy for task without Notion"
 fi
 
-# Step 2.7: Verify Kind environment
-echo ""
-echo "Step 2.7: Verifying Kind environment..."
+# Step 2.7: Verify Kind only for a task that declares k8s.
+if [ "$NEEDS_K8S" = "true" ]; then
+    echo ""
+    echo "Step 2.7: Verifying Kind environment..."
 
-if $CONTAINER_RUNTIME exec "$CONTAINER_NAME" which kind >/dev/null 2>&1; then
-    echo "✓ Kind is installed"
-    $CONTAINER_RUNTIME exec "$CONTAINER_NAME" kind version
-else
-    echo "✗ Kind is not installed, installing..."
-    $CONTAINER_RUNTIME exec "$CONTAINER_NAME" bash -c "
-        curl -Lo /tmp/kind https://kind.sigs.k8s.io/dl/v0.20.0/kind-linux-amd64 &&
-        chmod +x /tmp/kind &&
-        mv /tmp/kind /usr/local/bin/kind
-    "
-fi
+    if $CONTAINER_RUNTIME exec "$CONTAINER_NAME" which kind >/dev/null 2>&1; then
+        echo "✓ Kind is installed"
+        $CONTAINER_RUNTIME exec "$CONTAINER_NAME" kind version
+    else
+        echo "✗ Kind is not installed, installing..."
+        $CONTAINER_RUNTIME exec "$CONTAINER_NAME" bash -c "
+            curl -Lo /tmp/kind https://kind.sigs.k8s.io/dl/v0.20.0/kind-linux-amd64 &&
+            chmod +x /tmp/kind &&
+            mv /tmp/kind /usr/local/bin/kind
+        "
+    fi
 
-# Test Kind functionality
-echo "Testing Kind connection..."
-if $CONTAINER_RUNTIME exec --env DOCKER_API_VERSION=1.44 "$CONTAINER_NAME" $CONTAINER_RUNTIME version >/dev/null 2>&1; then
-    echo "✓ $CONTAINER_RUNTIME API accessible"
+    echo "Testing Kind connection..."
+    if $CONTAINER_RUNTIME exec --env DOCKER_API_VERSION=1.44 "$CONTAINER_NAME" $CONTAINER_RUNTIME version >/dev/null 2>&1; then
+        echo "✓ $CONTAINER_RUNTIME API accessible"
+    else
+        echo "✗ Cannot access $CONTAINER_RUNTIME API"
+        exit 1
+    fi
 else
-    echo "✗ Cannot access $CONTAINER_RUNTIME API"
-    exit 1
+    echo "Skipping Kind checks for task without k8s"
 fi
 
 # Step 3: Container preprocess only
@@ -707,6 +782,17 @@ if [ $PREPROCESS_EXIT_CODE -ne 0 ]; then
     exit $PREPROCESS_EXIT_CODE
 fi
 echo "✓ Preprocess completed"
+
+# Preprocess runs as root in the task image, while the decoupled agent loop
+# runs as the invoking host user. Hand ownership of the bind-mounted output
+# tree back before the host process writes status and trajectory files.
+HOST_UID=$(id -u)
+HOST_GID=$(id -g)
+if ! $CONTAINER_RUNTIME exec "$CONTAINER_NAME" \
+    chown -R -- "$HOST_UID:$HOST_GID" /workspace/dumps; then
+    echo "✗ Failed to hand output ownership to the host agent" >&2
+    exit 1
+fi
 
 if ! $CONTAINER_RUNTIME cp \
     "$CONTAINER_NAME:$CURRENT_CONTAINER_BUNDLE" \
@@ -809,7 +895,7 @@ fi
 echo ""
 echo "Step 4: Starting container MCP gateway on port $gateway_port ..."
 stage_trusted_bundle
-GATEWAY_START_CMD="nohup uv run python -m scripts.decoupled.container_tool_gateway --bundle_file $CURRENT_CONTAINER_BUNDLE --host 0.0.0.0 --port $gateway_port --debug > /workspace/logs/gateway.log 2>&1 & echo \$!"
+GATEWAY_START_CMD="nohup uv run python -m scripts.decoupled.container_tool_gateway --bundle_file $CURRENT_CONTAINER_BUNDLE --host $GATEWAY_BIND_HOST --port $gateway_port --debug > /workspace/logs/gateway.log 2>&1 & echo \$!"
 GATEWAY_PID=$($CONTAINER_RUNTIME exec "${EXEC_ENV_ARGS[@]}" "$CONTAINER_NAME" bash -c "$GATEWAY_START_CMD")
 echo "Gateway PID in container: $GATEWAY_PID"
 
