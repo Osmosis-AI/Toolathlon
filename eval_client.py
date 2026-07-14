@@ -984,7 +984,9 @@ def run(
                 "client_version": CLIENT_VERSION,  # Send client version for compatibility check
                 "mode": mode,
                 "base_url": base_url,
-                "api_key": api_key,
+                # Private mode proxies inference through the local WebSocket
+                # client, so the evaluator never needs the model API key.
+                "api_key": api_key if mode == "public" else None,
                 "model_name": model_name,
                 "workers": workers,
                 "custom_job_id": job_id,  # Pass custom job_id if provided
@@ -1132,14 +1134,19 @@ from eval_client import public_worker
 asyncio.run(public_worker('{server_url}', '{final_job_id}', '{output_dir}', {force_redownload}, {trust_env_in_httpx}))
 """
     else:  # private
-        api_key_arg = f"'{api_key}'" if api_key else "None"
         worker_code = f"""
 import asyncio
 import sys
 sys.path.insert(0, '{os.path.abspath(os.path.dirname(__file__))}')
 from eval_client import private_worker
-asyncio.run(private_worker('{server_url}', '{final_job_id}', '{client_id}', '{base_url}', {api_key_arg}, {ws_proxy_port}, '{output_dir}', {force_redownload}, {trust_env_in_httpx}))
+asyncio.run(private_worker('{server_url}', '{final_job_id}', '{client_id}', '{base_url}', None, {ws_proxy_port}, '{output_dir}', {force_redownload}, {trust_env_in_httpx}))
 """
+
+    worker_env = os.environ.copy()
+    if mode == "private" and api_key:
+        # Preserve CLI compatibility without placing the key in the detached
+        # worker's argv. Prefer setting TOOLATHLON_OPENAI_API_KEY directly.
+        worker_env.setdefault("TOOLATHLON_OPENAI_API_KEY", api_key)
 
     # Start detached background process
     process = subprocess.Popen(
@@ -1148,7 +1155,8 @@ asyncio.run(private_worker('{server_url}', '{final_job_id}', '{client_id}', '{ba
         stderr=subprocess.DEVNULL,
         stdin=subprocess.DEVNULL,
         start_new_session=True,
-        cwd=os.getcwd()
+        cwd=os.getcwd(),
+        env=worker_env,
     )
 
     typer.echo(f"\n✓ Background worker started (PID: {process.pid})")

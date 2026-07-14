@@ -11,6 +11,7 @@ import asyncio
 import httpx
 import argparse
 import json
+import os
 from datetime import datetime
 from websockets import connect, ConnectionClosedError
 
@@ -318,8 +319,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="WebSocket Proxy Client")
     parser.add_argument("--server-url", required=True, help="Server URL (e.g., http://47.253.6.47:8080)")
     parser.add_argument("--llm-base-url", required=True, help="Real LLM base URL (e.g., https://api.deepseek.com/v1)")
-    parser.add_argument("--llm-api-key", required=True, help="Real LLM API key")
+    parser.add_argument("--llm-api-key", help="Deprecated: prefer TOOLATHLON_OPENAI_API_KEY or OPENAI_API_KEY")
     parser.add_argument("--job-id", required=False, help="Job ID for authentication (required by server)")
 
     args = parser.parse_args()
-    asyncio.run(main(args.server_url, args.llm_base_url, args.llm_api_key, args.job_id))
+    llm_api_key = (
+        os.getenv("TOOLATHLON_OPENAI_API_KEY")
+        or os.getenv("OPENAI_API_KEY")
+        or args.llm_api_key
+        or ""
+    )
+    asyncio.run(main(args.server_url, args.llm_base_url, llm_api_key, args.job_id))
