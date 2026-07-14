@@ -228,12 +228,12 @@ esac
 
 if [ "$USE_UNIFIED_MODEL_ENV" = true ]; then
     if [ ! -z "${TOOLATHLON_OPENAI_BASE_URL+x}" ]; then
-        EXTRA_ENV_ARGS+=("-e" "TOOLATHLON_OPENAI_BASE_URL=${TOOLATHLON_OPENAI_BASE_URL}")
+        EXTRA_ENV_ARGS+=("-e" "TOOLATHLON_OPENAI_BASE_URL")
         echo "Detected host TOOLATHLON_OPENAI_BASE_URL, will pass into container"
     fi
 
     if [ ! -z "${TOOLATHLON_OPENAI_API_KEY+x}" ]; then
-        EXTRA_ENV_ARGS+=("-e" "TOOLATHLON_OPENAI_API_KEY=${TOOLATHLON_OPENAI_API_KEY}")
+        EXTRA_ENV_ARGS+=("-e" "TOOLATHLON_OPENAI_API_KEY")
         echo "Detected host TOOLATHLON_OPENAI_API_KEY, will pass into container"
     fi
 else
@@ -707,6 +707,17 @@ if [ $PREPROCESS_EXIT_CODE -ne 0 ]; then
     exit $PREPROCESS_EXIT_CODE
 fi
 echo "✓ Preprocess completed"
+
+# Preprocess runs as root in the task image, while the decoupled agent loop
+# runs as the invoking host user. Hand ownership of the bind-mounted output
+# tree back before the host process writes status and trajectory files.
+HOST_UID=$(id -u)
+HOST_GID=$(id -g)
+if ! $CONTAINER_RUNTIME exec "$CONTAINER_NAME" \
+    chown -R -- "$HOST_UID:$HOST_GID" /workspace/dumps; then
+    echo "✗ Failed to hand output ownership to the host agent" >&2
+    exit 1
+fi
 
 if ! $CONTAINER_RUNTIME cp \
     "$CONTAINER_NAME:$CURRENT_CONTAINER_BUNDLE" \
