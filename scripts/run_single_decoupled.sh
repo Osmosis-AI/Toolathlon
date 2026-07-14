@@ -228,12 +228,12 @@ esac
 
 if [ "$USE_UNIFIED_MODEL_ENV" = true ]; then
     if [ ! -z "${TOOLATHLON_OPENAI_BASE_URL+x}" ]; then
-        EXTRA_ENV_ARGS+=("-e" "TOOLATHLON_OPENAI_BASE_URL=${TOOLATHLON_OPENAI_BASE_URL}")
+        EXTRA_ENV_ARGS+=("-e" "TOOLATHLON_OPENAI_BASE_URL")
         echo "Detected host TOOLATHLON_OPENAI_BASE_URL, will pass into container"
     fi
 
     if [ ! -z "${TOOLATHLON_OPENAI_API_KEY+x}" ]; then
-        EXTRA_ENV_ARGS+=("-e" "TOOLATHLON_OPENAI_API_KEY=${TOOLATHLON_OPENAI_API_KEY}")
+        EXTRA_ENV_ARGS+=("-e" "TOOLATHLON_OPENAI_API_KEY")
         echo "Detected host TOOLATHLON_OPENAI_API_KEY, will pass into container"
     fi
 else
