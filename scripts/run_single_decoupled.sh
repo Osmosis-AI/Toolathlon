@@ -259,6 +259,20 @@ TRUSTED_BUNDLE_FILE=""
 HOST_AGENT_BUNDLE_FILE=""
 CURRENT_CONTAINER_BUNDLE=""
 
+# Ownership-restoration state for the bind-mounted output tree.  DUMPS_OWNER
+# is captured right before preprocess runs as container root, and
+# DUMPS_RESTORE_PENDING stays 1 until the tree has been handed back, so
+# cleanup() can finish a restoration the main flow never reached (preprocess
+# failure, SIGINT/SIGTERM).
+DUMPS_OWNER=""
+DUMPS_RESTORE_PENDING=0
+
+restore_dumps_ownership() {
+    $CONTAINER_RUNTIME exec "$CONTAINER_NAME" \
+        chown -R -- "$DUMPS_OWNER" /workspace/dumps || return 1
+    DUMPS_RESTORE_PENDING=0
+}
+
 # Cleanup function
 cleanup() {
     cleanup_exit_code=$?
@@ -271,6 +285,17 @@ cleanup() {
         $CONTAINER_RUNTIME exec "$CONTAINER_NAME" \
             rm -f -- "$CURRENT_CONTAINER_BUNDLE" >/dev/null 2>&1 || true
         CURRENT_CONTAINER_BUNDLE=""
+    fi
+
+    # Finish any pending ownership restoration while the container can still
+    # service exec calls, i.e. before it is stopped.  Best-effort: this covers
+    # preprocess failures and SIGINT/SIGTERM interruptions.
+    if [ "$DUMPS_RESTORE_PENDING" = "1" ]; then
+        if restore_dumps_ownership >/dev/null 2>&1; then
+            echo "  ✓ Restored output ownership: $output_folder"
+        else
+            echo "  Warning: could not restore output ownership: $output_folder" >&2
+        fi
     fi
 
     # Stop and remove container if exists
@@ -691,6 +716,7 @@ if [[ ! "$DUMPS_OWNER" =~ ^[0-9]+:[0-9]+$ ]]; then
     echo "✗ Invalid output ownership reported by container: $DUMPS_OWNER" >&2
     exit 1
 fi
+DUMPS_RESTORE_PENDING=1
 
 PREPROCESS_ARGS=(
     uv run python -m scripts.decoupled.container_preprocess
@@ -716,20 +742,26 @@ fi
 PREPROCESS_EXIT_CODE=$?
 set -e
 
+# Preprocess runs as container root and may have created files in the
+# bind-mounted output tree even when it failed.  Restore the tree to its
+# pre-preprocess owner in the container's user namespace regardless of the
+# preprocess result, so a failed run cannot strand root-owned files that
+# break the next retry or cleanup with the same PermissionError.
+if ! restore_dumps_ownership; then
+    if [ $PREPROCESS_EXIT_CODE -eq 0 ]; then
+        echo "✗ Failed to hand output ownership to the host agent" >&2
+        exit 1
+    fi
+    # Keep the preprocess exit code authoritative; cleanup() retries the
+    # restoration before the container is stopped.
+    echo "Warning: could not restore output ownership after failed preprocess" >&2
+fi
+
 if [ $PREPROCESS_EXIT_CODE -ne 0 ]; then
     echo "✗ Preprocess failed, exit code: $PREPROCESS_EXIT_CODE"
     exit $PREPROCESS_EXIT_CODE
 fi
 echo "✓ Preprocess completed"
-
-# Preprocess runs as container root. Restore the output tree to its
-# pre-preprocess owner in the container's user namespace, preserving host
-# writability under both rootful runtimes and rootless Podman.
-if ! $CONTAINER_RUNTIME exec "$CONTAINER_NAME" \
-    chown -R -- "$DUMPS_OWNER" /workspace/dumps; then
-    echo "✗ Failed to hand output ownership to the host agent" >&2
-    exit 1
-fi
 
 if ! $CONTAINER_RUNTIME cp \
     "$CONTAINER_NAME:$CURRENT_CONTAINER_BUNDLE" \
