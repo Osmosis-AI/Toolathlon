@@ -9,8 +9,20 @@
 # Behavior knobs (environment):
 #   FAKE_PREPROCESS_BEHAVIOR  succeed (default) | fail:<code> | hang
 #   FAKE_CHOWN_BEHAVIOR       succeed (default) | fail
+#   FAKE_START_BEHAVIOR       succeed (default) | fail
 #   FAKE_DUMPS_OWNER          uid:gid reported for /workspace/dumps
 #                             (default 1000:1000)
+#
+# Signal-semantics model (matches real docker/podman, verified against
+# rootful Docker 29.x): the local `docker exec` process is only an API
+# client.  Killing it -- even with a process-group signal -- does NOT kill
+# the exec'd process inside the container; that process lives in the
+# container's PID namespace and dies only when the container is torn down.
+# The `hang` behavior therefore detaches an "inner writer" into its own
+# session (perl POSIX::setsid; macOS has no setsid(1)) which keeps appending
+# `inner-write` events after the client is gone, and fake `stop` is what
+# kills it -- recording `stop-writer-alive` first if it was still running,
+# which is the observable proof that a group signal alone did not stop it.
 set -u
 
 STATE="${FAKE_RUNTIME_STATE:?FAKE_RUNTIME_STATE must be set}"
@@ -39,8 +51,31 @@ case "$cmd" in
         exit 0
         ;;
     stop)
-        echo "stop" >> "$STATE/events"
+        # Tearing down the container kills every process in its PID
+        # namespace, including exec'd ones the client abandoned.  Record
+        # whether the inner writer was still alive when stop arrived, then
+        # kill it and wait until it is gone -- when real `stop` returns,
+        # nothing inside the container is running anymore.
+        if [ -f "$STATE/inner_writer_pid" ]; then
+            writer_pid=$(cat "$STATE/inner_writer_pid")
+            if kill -0 "$writer_pid" 2>/dev/null; then
+                echo "stop-writer-alive" >> "$STATE/events"
+                kill -9 "$writer_pid" 2>/dev/null
+                while kill -0 "$writer_pid" 2>/dev/null; do sleep 0.01; done
+            fi
+        fi
+        echo "stop $*" >> "$STATE/events"
         rm -f "$STATE/running"
+        exit 0
+        ;;
+    start)
+        echo "start $*" >> "$STATE/events"
+        case "${FAKE_START_BEHAVIOR:-succeed}" in
+            fail)
+                exit 1
+                ;;
+        esac
+        touch "$STATE/running"
         exit 0
         ;;
     rm)
@@ -107,6 +142,22 @@ case "$cmd" in
                         exit "${FAKE_PREPROCESS_BEHAVIOR#fail:}"
                         ;;
                     hang)
+                        # Spawn the container-side process as its own session
+                        # leader so group-delivered signals kill only this
+                        # client, then block like the real exec client does.
+                        # The writer appends `inner-write` events (a stand-in
+                        # for creating root-owned files in the bind mount)
+                        # until fake `stop` kills it; the loop is bounded so
+                        # a failed scenario cannot leak it for long.
+                        perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die "exec failed: $!"' \
+                            bash -c '
+                                i=0
+                                while [ "$i" -lt 600 ]; do
+                                    echo "inner-write $i" >> "$FAKE_RUNTIME_STATE/events"
+                                    i=$((i + 1))
+                                    sleep 0.05
+                                done' &
+                        echo $! > "$STATE/inner_writer_pid"
                         sleep 120
                         exit 0
                         ;;

@@ -263,7 +263,9 @@ CURRENT_CONTAINER_BUNDLE=""
 # is captured right before preprocess runs as container root, and
 # DUMPS_RESTORE_PENDING stays 1 until the tree has been handed back, so
 # cleanup() can finish a restoration the main flow never reached (preprocess
-# failure, SIGINT/SIGTERM).
+# failure, SIGINT/SIGTERM).  On the interrupted path cleanup() must quiesce
+# the container before restoring: the exec'd preprocess can outlive its
+# local client and keep writing (see the pending block in cleanup()).
 DUMPS_OWNER=""
 DUMPS_RESTORE_PENDING=0
 
@@ -287,21 +289,38 @@ cleanup() {
         CURRENT_CONTAINER_BUNDLE=""
     fi
 
-    # Finish any pending ownership restoration while the container can still
-    # service exec calls, i.e. before it is stopped.  Best-effort: this covers
-    # preprocess failures and SIGINT/SIGTERM interruptions.
+    # Finish any pending ownership restoration.  Killing the local exec
+    # CLIENT (Ctrl-C, or run_parallel.py's process-group SIGTERM on task
+    # timeout) does not kill the exec'd process inside the container: it
+    # keeps writing root-owned files to the bind mount.  So quiesce first --
+    # stopping the container tears down its PID namespace and every writer
+    # in it -- then restart the now-inert container (its entrypoint is a
+    # plain `sleep`, and reusing the same container keeps the user-namespace
+    # mapping DUMPS_OWNER was captured under) and only then chown.
+    #
+    # The stop comes FIRST and uses -t 0: run_parallel.py escalates its
+    # SIGTERM to SIGKILL after only 3 seconds, PID 1 (`sleep`) can never
+    # honor a graceful stop anyway, and the daemon completes an accepted
+    # stop even if this script is killed before it returns.  Worst case a
+    # truncated cleanup leaves files with the wrong owner but no live
+    # writer, and the next successful run's full-tree hand-off chown
+    # self-heals them.
     if [ "$DUMPS_RESTORE_PENDING" = "1" ]; then
-        if restore_dumps_ownership >/dev/null 2>&1; then
+        $CONTAINER_RUNTIME stop -t 0 "$CONTAINER_NAME" >/dev/null 2>&1 || true
+        if $CONTAINER_RUNTIME start "$CONTAINER_NAME" >/dev/null 2>&1 \
+            && restore_dumps_ownership >/dev/null 2>&1; then
             echo "  ✓ Restored output ownership: $output_folder"
         else
             echo "  Warning: could not restore output ownership: $output_folder" >&2
         fi
     fi
 
-    # Stop and remove container if exists
+    # Stop and remove container if exists.  -t 0 also here: nothing inside
+    # can use a graceful stop (see above), so the default 10s grace is pure
+    # added latency on every exit path.
     if $CONTAINER_RUNTIME ps -aq --filter "name=$CONTAINER_NAME" 2>/dev/null | grep -q .; then
         echo "  Stopping and removing container: $CONTAINER_NAME"
-        $CONTAINER_RUNTIME stop "$CONTAINER_NAME" >/dev/null 2>&1 || true
+        $CONTAINER_RUNTIME stop -t 0 "$CONTAINER_NAME" >/dev/null 2>&1 || true
         $CONTAINER_RUNTIME rm "$CONTAINER_NAME" >/dev/null 2>&1 || true
         echo "  ✓ Container stopped and removed"
     fi
