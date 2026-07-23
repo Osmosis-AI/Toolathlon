@@ -283,12 +283,6 @@ cleanup() {
     echo ""
     echo "Performing cleanup..."
 
-    if [ -n "$CURRENT_CONTAINER_BUNDLE" ]; then
-        $CONTAINER_RUNTIME exec "$CONTAINER_NAME" \
-            rm -f -- "$CURRENT_CONTAINER_BUNDLE" >/dev/null 2>&1 || true
-        CURRENT_CONTAINER_BUNDLE=""
-    fi
-
     # Finish any pending ownership restoration.  Killing the local exec
     # CLIENT (Ctrl-C, or run_parallel.py's process-group SIGTERM on task
     # timeout) does not kill the exec'd process inside the container: it
@@ -298,21 +292,40 @@ cleanup() {
     # plain `sleep`, and reusing the same container keeps the user-namespace
     # mapping DUMPS_OWNER was captured under) and only then chown.
     #
-    # The stop comes FIRST and uses -t 0: run_parallel.py escalates its
+    # The stop is cleanup's FIRST container operation -- ahead even of the
+    # bundle removal below -- and uses -t 0: run_parallel.py escalates its
     # SIGTERM to SIGKILL after only 3 seconds, PID 1 (`sleep`) can never
     # honor a graceful stop anyway, and the daemon completes an accepted
-    # stop even if this script is killed before it returns.  Worst case a
-    # truncated cleanup leaves files with the wrong owner but no live
-    # writer, and the next successful run's full-tree hand-off chown
+    # stop even if this script is killed before it returns, whereas an exec
+    # needs this client to survive the whole round-trip.  Nothing may spend
+    # the kill window before the stop has been submitted.
+    #
+    # The stop's exit status gates the restoration: `start` returns 0 on an
+    # already-running container, so it proves nothing about the writer --
+    # only a successful stop does.  If the stop fails, skip the chown
+    # entirely rather than hand the tree over under a live writer; the
+    # teardown below retries the stop.  Worst case files are left with the
+    # wrong owner, and the next successful run's full-tree hand-off chown
     # self-heals them.
     if [ "$DUMPS_RESTORE_PENDING" = "1" ]; then
-        $CONTAINER_RUNTIME stop -t 0 "$CONTAINER_NAME" >/dev/null 2>&1 || true
-        if $CONTAINER_RUNTIME start "$CONTAINER_NAME" >/dev/null 2>&1 \
+        if $CONTAINER_RUNTIME stop -t 0 "$CONTAINER_NAME" >/dev/null 2>&1 \
+            && $CONTAINER_RUNTIME start "$CONTAINER_NAME" >/dev/null 2>&1 \
             && restore_dumps_ownership >/dev/null 2>&1; then
             echo "  ✓ Restored output ownership: $output_folder"
         else
             echo "  Warning: could not restore output ownership: $output_folder" >&2
         fi
+    fi
+
+    # Remove the in-container bundle copy on early exits (the normal flow
+    # discards it right after preprocess).  Best-effort and deliberately
+    # AFTER the quiesce: if the container is not running anymore the exec
+    # fails harmlessly and the unconditional `rm` below destroys the
+    # container filesystem, bundle included.
+    if [ -n "$CURRENT_CONTAINER_BUNDLE" ]; then
+        $CONTAINER_RUNTIME exec "$CONTAINER_NAME" \
+            rm -f -- "$CURRENT_CONTAINER_BUNDLE" >/dev/null 2>&1 || true
+        CURRENT_CONTAINER_BUNDLE=""
     fi
 
     # Stop and remove container if exists.  -t 0 also here: nothing inside

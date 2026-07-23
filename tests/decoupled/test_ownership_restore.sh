@@ -15,7 +15,9 @@
 # The container runtime (docker/podman) and the host-side `uv` probes are
 # replaced with fakes from tests/decoupled/fake_bin; no real containers are
 # involved.  The fakes record the commands the runner issues, and the tests
-# assert on that recorded event sequence plus the runner's exit code.  See
+# assert on that recorded event sequence plus the runner's exit code -- and,
+# for orderings the events file cannot see (execs it does not record, like
+# the bundle rm), on the complete calls.log invocation order.  See
 # fake_bin/docker for the client/container signal-semantics model.
 #
 # Corner-case -> coverage map:
@@ -35,11 +37,15 @@
 #           (quiesce-before-restore); `start` sits between them; the last
 #           `inner-write` precedes the cleanup chown (the race is closed)
 #   C5 run_parallel.py escalates SIGTERM to SIGKILL after only 3 seconds
-#        -> s4/s5: the pending path's FIRST container action is `stop`
-#           with `-t 0` (no 10s grace for a `sleep` PID 1 that cannot
-#           receive it; an accepted stop completes daemon-side even if the
-#           client is later SIGKILLed).  The SIGKILL truncation itself is
-#           not directly testable (a SIGKILLed bash leaves no state to
+#        -> s4/s5: cleanup's FIRST container operation of ANY kind is the
+#           quiesce `stop -t 0` -- ahead even of the bundle `exec rm`,
+#           which needs the client to survive the round-trip and could
+#           spend the whole window (no 10s grace for a `sleep` PID 1 that
+#           cannot receive it; an accepted stop completes daemon-side even
+#           if the client is later SIGKILLed).  The events file does not
+#           record the bundle rm, so this ordering is asserted from the
+#           complete calls.log.  The SIGKILL truncation itself is not
+#           directly testable (a SIGKILLed bash leaves no state to
 #           assert), so the mitigation is structural: ordering + timeout
 #           are asserted here, and the next-run self-heal is C8.
 #   C6 container restart fails after the quiesce stop
@@ -54,6 +60,14 @@
 #           <owner> /workspace/dumps` (argument shape asserted in s1), so
 #           the next successful run of the same output folder self-heals
 #           anything a killed cleanup left behind
+#   C9 the quiesce stop FAILS while the container keeps running.  `start`
+#      on an already-running container returns 0 (real-Docker semantics,
+#      observed in review on 29.6.2), so it cannot stand in as a
+#      stopped-state check
+#        -> s8: a failed first stop gates the whole restoration -- no
+#           `start`, no chown against the live writer, warning only --
+#           and the teardown stop (the fake fails only the first) still
+#           kills the writer; the stranded files are C8's self-heal
 #   Out of scope (documented follow-up, per review agreement): root-owned
 #   files written after the restoration point by task `process_command`
 #   background services or by the eval phase; both are the same family
@@ -160,7 +174,8 @@ run_runner() {
 }
 
 start_runner_own_pgroup() {
-    # $1 (optional) container-start behavior for the fake runtime.
+    # $1 (optional) container-start behavior, $2 (optional) container-stop
+    # behavior for the fake runtime.
     # Launch the runner as its own process-group leader so a signal can be
     # delivered to the whole group, mirroring Ctrl-C / an orchestrator kill.
     # A non-job-control shell starts async children with SIGINT/SIGQUIT
@@ -174,6 +189,7 @@ start_runner_own_pgroup() {
         FAKE_PREPROCESS_BEHAVIOR="hang" \
         FAKE_CHOWN_BEHAVIOR="succeed" \
         FAKE_START_BEHAVIOR="${1:-succeed}" \
+        FAKE_STOP_BEHAVIOR="${2:-succeed}" \
         FAKE_DUMPS_OWNER="1000:1000" \
         perl -e '$SIG{INT} = "DEFAULT"; $SIG{QUIT} = "DEFAULT"; setpgrp(0, 0); exec @ARGV; die "exec failed: $!"' \
         "${RUNNER_CMD[@]}" > "$STATE/runner.log" 2>&1 &
@@ -277,6 +293,43 @@ assert_last_event_order() {
     fi
 }
 
+assert_call_before_last() {
+    # $1 label, $2 fixed string whose FIRST calls.log occurrence must
+    # precede the LAST occurrence of fixed string $3.  calls.log sees every
+    # runtime invocation, including execs the events file never records
+    # (C5: cleanup's bundle rm); last-occurrence matching sidesteps the
+    # fake mktemp always returning the same bundle path, so earlier
+    # main-flow rms of that path cannot satisfy the assertion.
+    local first last
+    first=$(grep -nF -- "$2" "$STATE/calls.log" 2>/dev/null |
+        head -n 1 | cut -d: -f1)
+    last=$(grep -nF -- "$3" "$STATE/calls.log" 2>/dev/null |
+        tail -n 1 | cut -d: -f1)
+    if [ -n "$first" ] && [ -n "$last" ] && [ "$first" -lt "$last" ]; then
+        pass "$1"
+    else
+        fail "$1 (calls.log lines: first '$2'=${first:-absent}, last '$3'=${last:-absent}; see $SCENARIO_DIR)"
+    fi
+}
+
+assert_cleanup_opens_with_stop() {
+    # $1 label.  In the interrupted scenarios the hung preprocess exec is
+    # the last main-flow runtime invocation, so the very next call in
+    # calls.log is cleanup's first container operation.  Per C5 it must be
+    # the quiesce `stop -t 0`: not the bundle rm, not any other exec --
+    # nothing that needs a live client may spend the SIGKILL window before
+    # the stop has been submitted.
+    local pre next
+    pre=$(grep -n "container_preprocess" "$STATE/calls.log" 2>/dev/null |
+        tail -n 1 | cut -d: -f1)
+    next=""
+    [ -n "$pre" ] && next=$(sed -n "$((pre + 1))p" "$STATE/calls.log")
+    case "$next" in
+        *" stop -t 0 "*) pass "$1" ;;
+        *) fail "$1 (call after preprocess: '${next:-absent}'; see $SCENARIO_DIR)" ;;
+    esac
+}
+
 # ---------------------------------------------------------------------------
 # C1: preprocess fails but its exec client RETURNS, so the container-side
 # process is already gone -- the main flow restores ownership directly and
@@ -374,6 +427,11 @@ signal_scenario() {
         "SIG$sig: writer survives the signal; quiesce precedes restoration" \
         "preprocess-start" "inner-write" "stop-writer-alive" "stop -t 0" \
         "start" "chown -R -- 1000:1000 /workspace/dumps" "stop"
+    assert_call_before_last \
+        "SIG$sig: the quiesce stop is submitted before cleanup's bundle rm" \
+        "stop -t 0" "rm -f -- /run/fake-decoupled-bundle.json"
+    assert_cleanup_opens_with_stop \
+        "SIG$sig: cleanup's first container operation is the quiesce stop"
     assert_last_event_order \
         "SIG$sig: nothing is written after the restoration" \
         "inner-write" "chown -R -- "
@@ -425,6 +483,11 @@ else
         "143" "$s6_exit"
     assert_event_subsequence "s6: quiesce still happens before the failed restart" \
         "stop-writer-alive" "stop -t 0" "start"
+    assert_call_before_last \
+        "s6: the quiesce stop is submitted before cleanup's bundle rm" \
+        "stop -t 0" "rm -f -- /run/fake-decoupled-bundle.json"
+    assert_cleanup_opens_with_stop \
+        "s6: cleanup's first container operation is the quiesce stop"
     assert_no_event "s6: no restoration without a running container" \
         "chown -R -- "
     assert_log_contains "s6: the failure is reported as a warning" \
@@ -452,6 +515,60 @@ assert_eq "s7: exactly one restoration (the main-flow hand-off)" \
 assert_no_event "s7: cleanup's pending path is not entered" "start"
 assert_event_order "s7: hand-off precedes the final stop" \
     "chown -R -- " "stop"
+
+# ---------------------------------------------------------------------------
+# C9: the quiescing stop itself FAILS while the writer keeps running.  Real
+# `docker start` returns 0 on an already-running container, so the failed
+# stop is the runner's only signal -- it must gate the whole restoration:
+# no restart, no chown into a live writer, warning only.  The fake fails
+# just the first stop, so the teardown stop still kills the writer
+# (`stop-writer-alive` at the SECOND stop proves it was alive the whole
+# time chown could have run) and the container still comes down.
+note "scenario 8: failed quiesce stop skips restoration, writer never chowned"
+new_workdir
+start_runner_own_pgroup succeed fail-once
+if ! wait_for_file "$STATE/preprocess_started" 300; then
+    fail "s8: runner never reached preprocess (see $SCENARIO_DIR)"
+    kill -KILL -- "-$RUNNER_PID" 2>/dev/null
+    wait "$RUNNER_PID" 2>/dev/null
+else
+    sleep 0.5
+    kill -TERM -- "-$RUNNER_PID" 2>/dev/null
+    ( sleep 15 && kill -KILL -- "-$RUNNER_PID" ) >/dev/null 2>&1 &
+    s8_watchdog=$!
+    wait "$RUNNER_PID" 2>/dev/null
+    s8_exit=$?
+    kill "$s8_watchdog" 2>/dev/null
+    wait "$s8_watchdog" 2>/dev/null
+    assert_eq "s8: interruption exit code survives the failed stop" \
+        "143" "$s8_exit"
+    assert_no_event "s8: no chown while the writer may still be running" \
+        "chown -R -- "
+    assert_no_event "s8: no restart after a failed quiesce stop" "start"
+    assert_eq "s8: exactly one stop failure (the quiesce attempt)" \
+        "1" "$(count_events "stop-fail")"
+    assert_event_subsequence \
+        "s8: the writer outlives the failed stop, dies at the teardown stop" \
+        "preprocess-start" "inner-write" "stop-fail" "stop-writer-alive" \
+        "stop -t 0"
+    assert_log_contains "s8: the skipped restoration is reported as a warning" \
+        "Warning: could not restore output ownership"
+    assert_call_before_last \
+        "s8: the quiesce stop is submitted before cleanup's bundle rm" \
+        "stop -t 0" "rm -f -- /run/fake-decoupled-bundle.json"
+    assert_cleanup_opens_with_stop \
+        "s8: cleanup's first container operation is the quiesce stop"
+    if [ ! -e "$STATE/running" ]; then
+        pass "s8: container was stopped by the teardown retry"
+    else
+        fail "s8: container still running after cleanup (see $SCENARIO_DIR)"
+    fi
+    if [ ! -e "$STATE/created" ]; then
+        pass "s8: container was removed"
+    else
+        fail "s8: container still present after cleanup (see $SCENARIO_DIR)"
+    fi
+fi
 
 # ---------------------------------------------------------------------------
 echo ""
