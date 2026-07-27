@@ -47,7 +47,9 @@ ENV PATH="/root/.local/bin:$PATH"
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/* \
-    && npm install -g npm@latest
+    # npm 12 defaults allow-git to "none", which rejects this project's github:
+    # dependency. 11.18.0 is the last release that resolves it.
+    && npm install -g npm@11.18.0
 
 # install Docker CLI (for remote Docker daemon connection)
 RUN wget -q https://download.docker.com/linux/static/stable/x86_64/docker-24.0.7.tgz \
