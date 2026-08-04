@@ -2,7 +2,7 @@ from argparse import ArgumentParser
 import asyncio
 from google.cloud import bigquery
 from google.cloud.exceptions import NotFound
-from google.oauth2 import service_account
+from utils.app_specific.google_cloud_credentials import load_gcp_credentials
 from datetime import datetime, date
 from pathlib import Path
 import json
@@ -99,7 +99,7 @@ def setup_bigquery_client(credentials_file: str = None):
             print(f"❌ Cannot read project_id from credentials file")
             raise ValueError("Cannot read project_id from credentials file")
 
-        credentials = service_account.Credentials.from_service_account_file(str(credentials_path))
+        credentials = load_gcp_credentials(str(credentials_path))
         client = bigquery.Client(credentials=credentials, project=project_id)
         print(f"✅ Connected to BigQuery project: {project_id}")
         return client

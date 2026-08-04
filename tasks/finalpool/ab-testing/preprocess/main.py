@@ -4,7 +4,7 @@ import sys
 import subprocess
 import json
 from pathlib import Path
-from google.oauth2 import service_account
+from utils.app_specific.google_cloud_credentials import load_gcp_credentials
 from .ggcloud_clean_log import clean_log
 from .ggcloud_clean_dataset import clean_dataset  
 from .ggcloud_clean_bucket import clean_bucket
@@ -34,7 +34,7 @@ if __name__ == "__main__":
     if not credentials_path.is_absolute():
         credentials_path = Path.cwd() / credentials_path
     
-    credentials = service_account.Credentials.from_service_account_file(credentials_path)
+    credentials = load_gcp_credentials(credentials_path)
 
     project_id = get_project_id(credentials_path)
     print(f"Using project: {project_id}")

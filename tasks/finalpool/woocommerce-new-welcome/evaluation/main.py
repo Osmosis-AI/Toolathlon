@@ -59,10 +59,10 @@ class BigQueryDataValidator:
         if self.db is None:
             try:
                 from google.cloud import bigquery
-                from google.oauth2 import service_account
+                from utils.app_specific.google_cloud_credentials import load_gcp_credentials
 
                 # Use the same BigQuery connection approach as in main.py preprocessing
-                credentials = service_account.Credentials.from_service_account_file(self.credentials_path)
+                credentials = load_gcp_credentials(self.credentials_path)
                 client = bigquery.Client(credentials=credentials, project=self.project_id)
 
                 # Create a simple database interface matching the expected methods

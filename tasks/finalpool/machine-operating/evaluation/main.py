@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 import math
 import tempfile
 from google.cloud import storage
-from google.oauth2 import service_account
+from utils.app_specific.google_cloud_credentials import load_gcp_credentials
 from google.cloud.exceptions import NotFound
 
 from utils.evaluation.retry import grade_with_retry
@@ -21,7 +21,7 @@ from utils.evaluation.retry import grade_with_retry
 # Set credentials path
 CREDENTIALS_PATH = "configs/gcp-service_account.keys.json"
 if os.path.exists(CREDENTIALS_PATH):
-    credentials = service_account.Credentials.from_service_account_file(CREDENTIALS_PATH)
+    credentials = load_gcp_credentials(CREDENTIALS_PATH)
 else:
     credentials = None
 

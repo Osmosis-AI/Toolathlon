@@ -4,7 +4,7 @@ import json
 import tempfile
 import time
 from datetime import datetime, timedelta
-from google.oauth2 import service_account
+from utils.app_specific.google_cloud_credentials import load_gcp_credentials
 from google.cloud import storage
 from google.cloud import logging as cloud_logging
 from google.cloud.logging_v2.services.config_service_v2 import ConfigServiceV2Client
@@ -12,7 +12,7 @@ from google.cloud.logging_v2.services.config_service_v2 import ConfigServiceV2Cl
 # Set path to credentials file
 CREDENTIALS_PATH = "configs/gcp-service_account.keys.json"
 if os.path.exists(CREDENTIALS_PATH):
-    credentials = service_account.Credentials.from_service_account_file(CREDENTIALS_PATH)
+    credentials = load_gcp_credentials(CREDENTIALS_PATH)
 else:
     credentials = None
 

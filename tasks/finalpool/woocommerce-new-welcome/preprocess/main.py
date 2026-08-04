@@ -246,7 +246,7 @@ def main():
 
 import logging
 from google.cloud import bigquery
-from google.oauth2 import service_account
+from utils.app_specific.google_cloud_credentials import load_gcp_credentials
 from google.api_core.exceptions import Conflict, GoogleAPICallError, NotFound
 
 # Enable verbose logging for debugging
@@ -448,7 +448,7 @@ def setup_bigquery_resources(credentials_path: str, project_id: str, json_data: 
         print(f"🔗 Connecting to project '{project_id}' with credentials '{credentials_path}'...")
         
         # Use the newer authentication method
-        credentials = service_account.Credentials.from_service_account_file(credentials_path)
+        credentials = load_gcp_credentials(credentials_path)
         client = bigquery.Client(credentials=credentials, project=project_id)
         
         print("✅ Connection successful!")

@@ -3,7 +3,7 @@ import os
 import sys
 import json
 from pathlib import Path
-from google.oauth2 import service_account
+from utils.app_specific.google_cloud_credentials import load_gcp_credentials
 from .ggcloud_clean_dataset import clean_dataset
 from .ggcloud_upload import upload_transactions_data
 
@@ -45,7 +45,7 @@ def main():
         sys.exit(1)
 
     try:
-        credentials = service_account.Credentials.from_service_account_file(credentials_path)
+        credentials = load_gcp_credentials(credentials_path)
         print(f"✅ Loaded credentials from: {credentials_path}")
     except Exception as e:
         print(f"❌ Failed to load credentials: {e}")

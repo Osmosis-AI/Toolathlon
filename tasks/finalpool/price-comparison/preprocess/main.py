@@ -9,7 +9,7 @@ import os
 import json
 from pathlib import Path
 from google.cloud import bigquery
-from google.oauth2.service_account import Credentials
+from utils.app_specific.google_cloud_credentials import load_gcp_credentials
 
 # Add the root directory to the path to import utils
 sys.path.append(str(Path(__file__).parent.parent.parent.parent))
@@ -29,7 +29,7 @@ def _get_bigquery_client() -> bigquery.Client:
         
         if os.path.exists(service_account_path):
             print(f"Using service account from: {service_account_path}")
-            credentials = Credentials.from_service_account_file(service_account_path)
+            credentials = load_gcp_credentials(service_account_path)
             
             # Read project_id from service account file
             with open(service_account_path, 'r') as f:

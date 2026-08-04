@@ -7,7 +7,7 @@ import json
 import logging
 from datetime import datetime, date, timedelta
 from google.cloud import bigquery
-from google.oauth2 import service_account
+from utils.app_specific.google_cloud_credentials import load_gcp_credentials
 from google.api_core.exceptions import Conflict, GoogleAPICallError, NotFound
 import random
 import numpy as np
@@ -247,7 +247,7 @@ def setup_bigquery_resources(credentials_path: str, project_id: str, task_date: 
     try:
         print(f"🔗 Connecting to project '{project_id}' using credentials '{credentials_path}'...")
 
-        credentials = service_account.Credentials.from_service_account_file(credentials_path)
+        credentials = load_gcp_credentials(credentials_path)
         client = bigquery.Client(credentials=credentials, project=project_id)
 
         print("✅ Connection successful!")
