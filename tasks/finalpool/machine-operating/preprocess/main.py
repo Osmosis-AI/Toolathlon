@@ -5,7 +5,7 @@ import json
 from google.cloud import storage
 from google.cloud import bigquery
 from google.cloud.exceptions import NotFound, Conflict
-from google.oauth2 import service_account
+from utils.app_specific.google_cloud_credentials import load_gcp_credentials
 import random
 
 random.seed(42)
@@ -13,7 +13,7 @@ random.seed(42)
 # Set path to credentials file
 CREDENTIALS_PATH = "configs/gcp-service_account.keys.json"
 if os.path.exists(CREDENTIALS_PATH):
-    credentials = service_account.Credentials.from_service_account_file(CREDENTIALS_PATH)
+    credentials = load_gcp_credentials(CREDENTIALS_PATH)
 else:
     credentials = None
 

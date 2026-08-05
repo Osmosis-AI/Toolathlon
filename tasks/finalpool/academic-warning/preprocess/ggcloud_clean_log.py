@@ -7,14 +7,14 @@ import sys
 import subprocess
 from datetime import datetime, timedelta
 import os
-from google.oauth2 import service_account
+from utils.app_specific.google_cloud_credentials import load_gcp_credentials
 from google.cloud.logging_v2.types import CreateBucketRequest
 import json
 
 # Set path to credentials file
 CREDENTIALS_PATH = "configs/gcp-service_account.keys.json"
 if os.path.exists(CREDENTIALS_PATH):
-    CREDENTIALS = service_account.Credentials.from_service_account_file(CREDENTIALS_PATH)
+    CREDENTIALS = load_gcp_credentials(CREDENTIALS_PATH)
 else:
     CREDENTIALS = None
 

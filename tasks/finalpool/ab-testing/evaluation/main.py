@@ -4,7 +4,7 @@ import csv
 import json
 import subprocess
 from google.cloud import storage, logging
-from google.oauth2 import service_account
+from utils.app_specific.google_cloud_credentials import load_gcp_credentials
 from google.api_core import exceptions
 from pathlib import Path
 from datetime import datetime
@@ -113,7 +113,7 @@ def get_project_id_and_credentials(credentials_file="configs/gcp-service_account
             data = json.load(f)
             project_id = data.get("project_id")
 
-        credentials = service_account.Credentials.from_service_account_file(credentials_path)
+        credentials = load_gcp_credentials(credentials_path)
         return project_id, credentials
     except FileNotFoundError:
         print(f"Warning: Credentials file not found at '{credentials_path}', falling back to gcloud command")
