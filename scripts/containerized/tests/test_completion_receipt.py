@@ -266,32 +266,102 @@ class CompletionReceiptSchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(scheduler.completed_tasks, 0)
         self.assertEqual(scheduler.failed_tasks, 1)
 
+    @patch.object(run_parallel_module, "write_completion_receipt")
+    @patch.object(run_parallel_module, "run_command_async", new_callable=AsyncMock)
+    async def test_stale_artifact_after_archive_failure_stops_before_command(
+        self, run_command: AsyncMock, write_receipt
+    ) -> None:
+        with tempfile.TemporaryDirectory() as dump_path:
+            task_dir = Path(dump_path) / "finalpool" / "demo-task"
+            task_dir.mkdir(parents=True)
+            (task_dir / "eval_res.json").write_text('{"pass": true}', encoding="utf-8")
+            scheduler = AsyncTaskScheduler(None, 1)
+
+            with patch.object(
+                run_parallel_module.shutil,
+                "move",
+                side_effect=OSError("read-only"),
+            ):
+                result = await scheduler._execute_task(
+                    "finalpool/demo-task",
+                    "tag",
+                    "model",
+                    "provider",
+                    "10",
+                    30,
+                    False,
+                    dump_path=dump_path,
+                )
+
+            self.assertFalse(completion_receipt_path(dump_path, "demo-task").exists())
+
+        run_command.assert_not_awaited()
+        write_receipt.assert_not_called()
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("eval_res.json", result["error"])
+
     @patch.object(
         run_parallel_module,
         "write_completion_receipt",
         side_effect=OSError("disk full"),
     )
     @patch.object(run_parallel_module, "run_command_async", new_callable=AsyncMock)
-    async def test_receipt_failure_does_not_fail_task(
+    async def test_unsigned_receipt_failure_does_not_fail_task(
         self, run_command: AsyncMock, write_receipt
     ) -> None:
         run_command.return_value = {"returncode": 0, "success": True}
         with tempfile.TemporaryDirectory() as dump_path:
             scheduler = AsyncTaskScheduler(None, 1)
 
-            result = await scheduler._execute_task(
-                "finalpool/demo-task",
-                "tag",
-                "model",
-                "provider",
-                "10",
-                30,
-                False,
-                dump_path=dump_path,
-            )
+            with patch.dict(os.environ, {}, clear=True):
+                result = await scheduler._execute_task(
+                    "finalpool/demo-task",
+                    "tag",
+                    "model",
+                    "provider",
+                    "10",
+                    30,
+                    False,
+                    dump_path=dump_path,
+                )
 
             self.assertEqual(result["status"], "success")
             write_receipt.assert_called_once()
+
+    @patch.object(
+        run_parallel_module,
+        "write_completion_receipt",
+        side_effect=OSError("disk full"),
+    )
+    @patch.object(run_parallel_module, "run_command_async", new_callable=AsyncMock)
+    async def test_signed_receipt_failure_marks_task_failed(
+        self, run_command: AsyncMock, write_receipt
+    ) -> None:
+        run_command.return_value = {"returncode": 0, "success": True}
+        with tempfile.TemporaryDirectory() as dump_path:
+            scheduler = AsyncTaskScheduler(None, 1)
+
+            with patch.dict(
+                os.environ,
+                {"TOOLATHLON_COMPLETION_RECEIPT_KEY_FILE": "/receipt-key"},
+                clear=True,
+            ):
+                result = await scheduler._execute_task(
+                    "finalpool/demo-task",
+                    "tag",
+                    "model",
+                    "provider",
+                    "10",
+                    30,
+                    False,
+                    dump_path=dump_path,
+                )
+
+        write_receipt.assert_called_once()
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("failed to write signed completion receipt", result["error"])
+        self.assertEqual(scheduler.completed_tasks, 0)
+        self.assertEqual(scheduler.failed_tasks, 1)
 
     @patch.object(run_parallel_module, "write_completion_receipt")
     @patch.object(run_parallel_module, "run_command_async", new_callable=AsyncMock)

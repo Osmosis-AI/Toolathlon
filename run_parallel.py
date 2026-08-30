@@ -478,6 +478,17 @@ class AsyncTaskScheduler:
                     ) from e
 
             self._archive_previous_results(dump_path, tasks_folder, task_name)
+            if runner == "containerized":
+                stale_artifacts = [
+                    artifact
+                    for artifact in COMPLETION_ARTIFACTS
+                    if os.path.lexists(task_result_dir / artifact)
+                ]
+                if stale_artifacts:
+                    raise RuntimeError(
+                        f"stale completion artifacts remain after archive for "
+                        f"{task_name}: {', '.join(stale_artifacts)}"
+                    )
             result = await run_command_async(command, log_file, timeout_seconds=timeout, scheduler=self)
 
             if (
@@ -496,6 +507,11 @@ class AsyncTaskScheduler:
                         result["returncode"],
                     )
                 except Exception as e:
+                    if "TOOLATHLON_COMPLETION_RECEIPT_KEY_FILE" in os.environ:
+                        raise RuntimeError(
+                            f"failed to write signed completion receipt for "
+                            f"{task_name}: {e}"
+                        ) from e
                     print(f"  ⚠️ Failed to write completion receipt for {task_name}: {e}")
             
             self.completed_tasks += 1
