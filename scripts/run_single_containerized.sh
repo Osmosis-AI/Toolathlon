@@ -24,6 +24,7 @@ eval_config=${7:-"scripts/formal_run_v0.json"}
 image_name=${8:-"lockon0927/toolathlon-task-image:1016beta"}
 containerized_mode=${TOOLATHLON_CONTAINERIZED_MODE:-"phased"}
 parent_captures_run_log=${TOOLATHLON_PARENT_CAPTURES_RUN_LOG:-"0"}
+UNSAFE_CLEANUP_EXIT_CODE=200
 
 case "$containerized_mode" in
     phased)
@@ -180,12 +181,20 @@ cleanup() {
         TRUSTED_STASH_DIR=""
     fi
 
-    # Stop and remove container if exists
-    if $CONTAINER_RUNTIME ps -aq --filter "name=$CONTAINER_NAME" 2>/dev/null | grep -q .; then
-        echo "  Stopping and removing container: $CONTAINER_NAME"
-        $CONTAINER_RUNTIME stop "$CONTAINER_NAME" >/dev/null 2>&1 || true
-        $CONTAINER_RUNTIME rm "$CONTAINER_NAME" >/dev/null 2>&1 || true
-        echo "  ✓ Container stopped and removed"
+    # Stop/remove by exact name even when the container was never created, then
+    # fail closed unless the runtime can confirm that it is gone.
+    $CONTAINER_RUNTIME stop "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    $CONTAINER_RUNTIME rm "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    remaining_container_ids=$($CONTAINER_RUNTIME ps -aq --filter "name=$CONTAINER_NAME" 2>/dev/null)
+    container_query_exit_code=$?
+    if [ "$container_query_exit_code" -ne 0 ]; then
+        echo "  Error: failed to verify container cleanup: $CONTAINER_NAME" >&2
+        cleanup_exit_code=$UNSAFE_CLEANUP_EXIT_CODE
+    elif [ -n "$remaining_container_ids" ]; then
+        echo "  Error: container still exists after cleanup: $CONTAINER_NAME" >&2
+        cleanup_exit_code=$UNSAFE_CLEANUP_EXIT_CODE
+    else
+        echo "  ✓ Container absence verified"
     fi
     echo "Cleanup completed"
     exit "$cleanup_exit_code"

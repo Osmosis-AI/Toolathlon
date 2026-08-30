@@ -1,12 +1,16 @@
 import asyncio
 import argparse
+import hashlib
+import hmac
 import shortuuid
 import os
 import json
 import signal
+import stat
 import sys
 import psutil
 import shutil
+import tempfile
 from utils.general.helper import read_json
 import subprocess
 from typing import List, Optional, Dict
@@ -14,6 +18,130 @@ import time
 from datetime import datetime
 from pathlib import Path
 import random
+
+
+COMPLETION_ARTIFACTS = (
+    "eval_res.json",
+    "traj_log.json",
+    "status.json",
+    "run.log",
+    "container.log",
+)
+UNSAFE_CLEANUP_EXIT_CODE = 200
+
+
+def prepare_completion_receipt_dir(dump_path: str) -> Path:
+    receipt_dir = Path(dump_path) / "_completion_receipts"
+    receipt_dir.mkdir(parents=True, exist_ok=True)
+    if not stat.S_ISDIR(receipt_dir.lstat().st_mode):
+        raise ValueError(f"completion receipt path is not a directory: {receipt_dir}")
+    return receipt_dir
+
+
+def completion_receipt_path(dump_path: str, task_name: str) -> Path:
+    if Path(task_name).name != task_name or task_name in {".", ".."}:
+        raise ValueError(f"unsafe completion receipt task name: {task_name}")
+    return prepare_completion_receipt_dir(dump_path) / f"{task_name}.json"
+
+
+def _hash_regular_file(path: Path) -> dict:
+    if not stat.S_ISREG(path.lstat().st_mode):
+        raise ValueError(f"completion artifact is not a regular file: {path}")
+
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ValueError(f"completion artifact is not a regular file: {path}")
+        digest = hashlib.sha256()
+        size = 0
+        with os.fdopen(descriptor, "rb", closefd=False) as artifact_file:
+            for chunk in iter(lambda: artifact_file.read(1024 * 1024), b""):
+                digest.update(chunk)
+                size += len(chunk)
+        return {"sha256": digest.hexdigest(), "size": size}
+    finally:
+        os.close(descriptor)
+
+
+def _read_completion_receipt_key() -> bytes:
+    key_file_name = os.environ.get("TOOLATHLON_COMPLETION_RECEIPT_KEY_FILE")
+    if not key_file_name:
+        raise ValueError("TOOLATHLON_COMPLETION_RECEIPT_KEY_FILE is not set")
+
+    key_path = Path(key_file_name)
+    if not stat.S_ISREG(key_path.lstat().st_mode):
+        raise ValueError(f"completion receipt key is not a regular file: {key_path}")
+    descriptor = os.open(key_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ValueError(f"completion receipt key is not a regular file: {key_path}")
+        with os.fdopen(descriptor, "rb", closefd=False) as key_file:
+            key = key_file.read(4097)
+    finally:
+        os.close(descriptor)
+
+    if not 32 <= len(key) <= 4096:
+        raise ValueError("completion receipt key must contain 32 to 4096 bytes")
+    return key
+
+
+def write_completion_receipt(
+    dump_path: str,
+    task_name: str,
+    task_result_dir: Path,
+    producer_returncode: int,
+) -> Path:
+    artifacts = {}
+    for artifact_name in COMPLETION_ARTIFACTS:
+        artifact_path = task_result_dir / artifact_name
+        if os.path.lexists(artifact_path):
+            artifacts[artifact_name] = _hash_regular_file(artifact_path)
+
+    receipt_path = completion_receipt_path(dump_path, task_name)
+    payload = {
+        "schema_version": 1,
+        "task_name": task_name,
+        "producer_returncode": producer_returncode,
+        "artifacts": artifacts,
+    }
+    canonical_payload = json.dumps(
+        payload, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    receipt = {
+        **payload,
+        "hmac_sha256": hmac.new(
+            _read_completion_receipt_key(), canonical_payload, hashlib.sha256
+        ).hexdigest(),
+    }
+
+    temporary_path = None
+    try:
+        descriptor, temporary_path = tempfile.mkstemp(
+            prefix=f".{task_name}.", suffix=".tmp", dir=receipt_path.parent
+        )
+        with os.fdopen(descriptor, "w", encoding="utf-8") as receipt_file:
+            json.dump(receipt, receipt_file, sort_keys=True, separators=(",", ":"))
+            receipt_file.write("\n")
+            receipt_file.flush()
+            os.fsync(receipt_file.fileno())
+        os.replace(temporary_path, receipt_path)
+        temporary_path = None
+
+        try:
+            directory_descriptor = os.open(
+                receipt_path.parent,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+            )
+            try:
+                os.fsync(directory_descriptor)
+            finally:
+                os.close(directory_descriptor)
+        except OSError:
+            pass
+        return receipt_path
+    finally:
+        if temporary_path is not None:
+            Path(temporary_path).unlink(missing_ok=True)
 
 
 async def run_command_async(command: str, log_file: str, timeout_seconds: int = 1800, scheduler: 'AsyncTaskScheduler' = None):
@@ -38,7 +166,12 @@ async def run_command_async(command: str, log_file: str, timeout_seconds: int = 
                 command,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,  # Redirect stderr to stdout
-                preexec_fn=os.setsid  # Start new process group for easier process cleanup
+                preexec_fn=os.setsid,  # Start new process group for easier process cleanup
+                env={
+                    key: value
+                    for key, value in os.environ.items()
+                    if key != "TOOLATHLON_COMPLETION_RECEIPT_KEY_FILE"
+                },
             )
 
             # Add process to active set
@@ -324,8 +457,7 @@ class AsyncTaskScheduler:
             tasks_folder = ""
             task_name = task_dir_arg
 
-        self._archive_previous_results(dump_path, tasks_folder, task_name)
-
+        task_result_dir = Path(dump_path) / tasks_folder / task_name
         log_file = os.path.join(dump_path, tasks_folder, task_name, "run.log")
         container_log_file = os.path.join(dump_path, tasks_folder, task_name, "container.log")
         
@@ -337,7 +469,34 @@ class AsyncTaskScheduler:
             print(f"   🔒 Running with conflict lock")
         
         try:
+            if runner == "containerized":
+                try:
+                    completion_receipt_path(dump_path, task_name).unlink(missing_ok=True)
+                except Exception as e:
+                    raise RuntimeError(
+                        f"failed to clear stale completion receipt for {task_name}: {e}"
+                    ) from e
+
+            self._archive_previous_results(dump_path, tasks_folder, task_name)
             result = await run_command_async(command, log_file, timeout_seconds=timeout, scheduler=self)
+
+            if (
+                runner == "containerized"
+                and result["returncode"] == UNSAFE_CLEANUP_EXIT_CODE
+            ):
+                raise RuntimeError(
+                    f"container cleanup could not be verified for {task_name}"
+                )
+            if runner == "containerized":
+                try:
+                    write_completion_receipt(
+                        dump_path,
+                        task_name,
+                        task_result_dir,
+                        result["returncode"],
+                    )
+                except Exception as e:
+                    print(f"  ⚠️ Failed to write completion receipt for {task_name}: {e}")
             
             self.completed_tasks += 1
             elapsed = (datetime.now() - task_start).total_seconds()
@@ -582,6 +741,15 @@ async def main():
                        help="Agent framework for decoupled runner, e.g. claude_agent_sdk")
     
     args = parser.parse_args()
+
+    dump_path = args.dump_path if args.dump_path else "dumps"
+    if args.runner == "containerized":
+        try:
+            prepare_completion_receipt_dir(dump_path)
+        except Exception as e:
+            raise SystemExit(
+                f"Error: could not prepare completion receipt directory: {e}"
+            ) from e
     
     # Generate tag or use provided
     if args.tag is None:
@@ -625,8 +793,6 @@ async def main():
     if not all_task_dir_args:
         print("No tasks found!")
         return
-
-    dump_path = args.dump_path if args.dump_path else "dumps"
 
     tasks_to_execute, tasks_already_completed = filter_tasks_with_existing_results(all_task_dir_args, dump_path)
 
