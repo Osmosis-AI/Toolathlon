@@ -109,18 +109,16 @@ class DecoupledIsolationRunnerTests(unittest.TestCase):
             '[ "$parent_captures_run_log" != "1" ]', self.script
         )
 
-        decoupled_branch_start = self.parallel_runner.index(
-            'if runner == "decoupled":'
+        execute_task_start = self.parallel_runner.index("async def _execute_task")
+        execute_task_end = self.parallel_runner.index(
+            "    def print_progress", execute_task_start
         )
-        containerized_branch_start = self.parallel_runner.index(
-            "        else:", decoupled_branch_start
-        )
-        decoupled_branch = self.parallel_runner[
-            decoupled_branch_start:containerized_branch_start
-        ]
+        execute_task = self.parallel_runner[execute_task_start:execute_task_end]
         self.assertIn(
-            'TOOLATHLON_PARENT_CAPTURES_RUN_LOG=1', decoupled_branch
+            'child_env = {"TOOLATHLON_PARENT_CAPTURES_RUN_LOG": "1"}',
+            execute_task,
         )
+        self.assertIn("extra_env=child_env", execute_task)
 
 
 if __name__ == "__main__":
