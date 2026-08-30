@@ -6,6 +6,7 @@ import shortuuid
 import os
 import json
 import signal
+import shlex
 import stat
 import sys
 import psutil
@@ -28,6 +29,11 @@ COMPLETION_ARTIFACTS = (
     "container.log",
 )
 UNSAFE_CLEANUP_EXIT_CODE = 200
+TIMEOUT_EXIT_CODE = 124
+COMPLETION_CLEANUP_MARKER_ENV = "TOOLATHLON_COMPLETION_CLEANUP_MARKER_FILE"
+COMPLETION_CLEANUP_MARKER_CONTENT = "container-absent\n"
+COMPLETION_KIND_PROCESS_EXIT = "process_exit"
+COMPLETION_KIND_SCHEDULER_TIMEOUT = "scheduler_timeout"
 
 
 def prepare_completion_receipt_dir(dump_path: str) -> Path:
@@ -38,10 +44,157 @@ def prepare_completion_receipt_dir(dump_path: str) -> Path:
     return receipt_dir
 
 
-def completion_receipt_path(dump_path: str, task_name: str) -> Path:
+def _completion_receipt_path(dump_path: str, task_name: str) -> Path:
     if Path(task_name).name != task_name or task_name in {".", ".."}:
         raise ValueError(f"unsafe completion receipt task name: {task_name}")
-    return prepare_completion_receipt_dir(dump_path) / f"{task_name}.json"
+    return Path(dump_path) / "_completion_receipts" / f"{task_name}.json"
+
+
+def completion_receipt_path(dump_path: str, task_name: str) -> Path:
+    path = _completion_receipt_path(dump_path, task_name)
+    prepare_completion_receipt_dir(dump_path)
+    return path
+
+
+def _new_completion_cleanup_marker(dump_path: str, task_name: str) -> Path:
+    receipt_dir = prepare_completion_receipt_dir(dump_path).resolve()
+    descriptor, marker_name = tempfile.mkstemp(
+        prefix=f".{task_name}.", suffix=".cleanup", dir=receipt_dir
+    )
+    os.close(descriptor)
+    marker = Path(marker_name)
+    marker.unlink()
+    return marker
+
+
+def _completion_cleanup_verified(marker: Path | None) -> bool:
+    if marker is None:
+        return False
+    try:
+        mode = marker.lstat().st_mode
+        return stat.S_ISREG(mode) and marker.read_text(
+            encoding="utf-8"
+        ) == COMPLETION_CLEANUP_MARKER_CONTENT
+    except OSError:
+        return False
+
+
+def _completion_evidence_matches_returncode(
+    task_result_dir: Path,
+    artifacts: set[str] | dict,
+    producer_returncode: int,
+    completion_kind: str,
+) -> bool:
+    """Validate evaluator evidence and its parent-observed completion kind."""
+    eval_verdict = None
+    if "eval_res.json" in artifacts:
+        eval_res = json.loads(
+            (task_result_dir / "eval_res.json").read_text(encoding="utf-8")
+        )
+        if not isinstance(eval_res, dict):
+            return False
+        eval_verdict = eval_res.get("pass")
+        if eval_verdict is not None and not isinstance(eval_verdict, bool):
+            return False
+
+    status_verdict = None
+    running_status = None
+    if "status.json" in artifacts:
+        status_value = json.loads(
+            (task_result_dir / "status.json").read_text(encoding="utf-8")
+        )
+        if not isinstance(status_value, dict):
+            return False
+        running_status = status_value.get("running")
+        status_verdict = status_value.get("evaluation")
+        if isinstance(status_verdict, str):
+            folded = status_verdict.strip().lower()
+            if folded not in {"pass", "fail"}:
+                return False
+            status_verdict = folded == "pass"
+        elif status_verdict is not None and not isinstance(status_verdict, bool):
+            return False
+
+    if isinstance(eval_verdict, bool) or isinstance(status_verdict, bool):
+        if (
+            completion_kind != COMPLETION_KIND_PROCESS_EXIT
+            or "eval_res.json" not in artifacts
+            or "status.json" not in artifacts
+            or eval_verdict is not status_verdict
+            or producer_returncode != (0 if eval_verdict else 1)
+        ):
+            return False
+    if completion_kind == COMPLETION_KIND_SCHEDULER_TIMEOUT:
+        return (
+            running_status == "timeout"
+            and eval_verdict is None
+            and status_verdict is None
+            and producer_returncode == TIMEOUT_EXIT_CODE
+        )
+    return (
+        completion_kind == COMPLETION_KIND_PROCESS_EXIT
+        and running_status != "timeout"
+    )
+
+
+def _has_valid_completion_receipt(
+    dump_path: str, task_name: str, task_result_dir: Path
+) -> bool:
+    receipt = Path(dump_path) / "_completion_receipts" / f"{task_name}.json"
+    try:
+        if not stat.S_ISREG(receipt.lstat().st_mode):
+            return False
+        value = json.loads(receipt.read_text(encoding="utf-8"))
+        if not isinstance(value, dict):
+            return False
+        signature = value.pop("hmac_sha256", None)
+        if (
+            value.get("schema_version") != 1
+            or isinstance(value.get("schema_version"), bool)
+            or value.get("task_name") != task_name
+            or value.get("completion_kind") not in {
+                COMPLETION_KIND_PROCESS_EXIT,
+                COMPLETION_KIND_SCHEDULER_TIMEOUT,
+            }
+            or not isinstance(value.get("producer_returncode"), int)
+            or isinstance(value.get("producer_returncode"), bool)
+            or not isinstance(signature, str)
+        ):
+            return False
+        expected_signature = hmac.new(
+            _read_completion_receipt_key(),
+            json.dumps(value, sort_keys=True, separators=(",", ":")).encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        if not hmac.compare_digest(signature, expected_signature):
+            return False
+
+        manifest = value.get("artifacts")
+        if not isinstance(manifest, dict) or not set(manifest).issubset(
+            COMPLETION_ARTIFACTS
+        ):
+            return False
+        actual_artifacts = {
+            name
+            for name in COMPLETION_ARTIFACTS
+            if os.path.lexists(task_result_dir / name)
+        }
+        if actual_artifacts != set(manifest):
+            return False
+        for name, expected in manifest.items():
+            if not isinstance(expected, dict) or _hash_regular_file(
+                task_result_dir / name
+            ) != expected:
+                return False
+
+        return _completion_evidence_matches_returncode(
+            task_result_dir,
+            manifest,
+            value["producer_returncode"],
+            value["completion_kind"],
+        )
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
 
 
 def _hash_regular_file(path: Path) -> dict:
@@ -90,17 +243,32 @@ def write_completion_receipt(
     task_name: str,
     task_result_dir: Path,
     producer_returncode: int,
+    *,
+    completion_kind: str,
 ) -> Path:
+    """Sign the cooperative runner's post-exit artifact snapshot.
+
+    This is a lifecycle consistency marker, not a sandbox boundary for model
+    code that deliberately uses the host container-runtime socket.
+    """
     artifacts = {}
     for artifact_name in COMPLETION_ARTIFACTS:
         artifact_path = task_result_dir / artifact_name
         if os.path.lexists(artifact_path):
             artifacts[artifact_name] = _hash_regular_file(artifact_path)
 
+    if not _completion_evidence_matches_returncode(
+        task_result_dir, artifacts, producer_returncode, completion_kind
+    ):
+        raise ValueError(
+            "completion evidence does not match the producer lifecycle"
+        )
+
     receipt_path = completion_receipt_path(dump_path, task_name)
     payload = {
         "schema_version": 1,
         "task_name": task_name,
+        "completion_kind": completion_kind,
         "producer_returncode": producer_returncode,
         "artifacts": artifacts,
     }
@@ -144,7 +312,13 @@ def write_completion_receipt(
             Path(temporary_path).unlink(missing_ok=True)
 
 
-async def run_command_async(command: str, log_file: str, timeout_seconds: int = 1800, scheduler: 'AsyncTaskScheduler' = None):
+async def run_command_async(
+    command: List[str],
+    log_file: str,
+    timeout_seconds: int = 1800,
+    scheduler: 'AsyncTaskScheduler' = None,
+    extra_env: Optional[Dict[str, str]] = None,
+):
     """
     Asynchronously execute a shell command with timeout and log output.
     timeout_seconds: default 1800 seconds (30 min)
@@ -155,23 +329,26 @@ async def run_command_async(command: str, log_file: str, timeout_seconds: int = 
     if log_dir:
         os.makedirs(log_dir, exist_ok=True)
 
+    process = None
     try:
         # Start subprocess and redirect output to log file
         with open(log_file, 'w') as f:
-            f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Command: {command}\n")
+            f.write(
+                f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+                f"Command: {shlex.join(command)}\n"
+            )
             f.write("="*80 + "\n")
             f.flush()
 
-            process = await asyncio.create_subprocess_shell(
-                command,
+            child_env = os.environ.copy()
+            child_env.update(extra_env or {})
+            child_env.pop("TOOLATHLON_COMPLETION_RECEIPT_KEY_FILE", None)
+            process = await asyncio.create_subprocess_exec(
+                *command,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,  # Redirect stderr to stdout
                 preexec_fn=os.setsid,  # Start new process group for easier process cleanup
-                env={
-                    key: value
-                    for key, value in os.environ.items()
-                    if key != "TOOLATHLON_COMPLETION_RECEIPT_KEY_FILE"
-                },
+                env=child_env,
             )
 
             # Add process to active set
@@ -212,17 +389,20 @@ async def run_command_async(command: str, log_file: str, timeout_seconds: int = 
     except asyncio.TimeoutError:
         # Kill process group on timeout
         try:
-            if process.returncode is None:
+            if process is not None and process.returncode is None:
                 os.killpg(os.getpgid(process.pid), signal.SIGTERM)
-                await asyncio.sleep(3)  # Graceful shutdown
-                if process.returncode is None:
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=15)
+                except asyncio.TimeoutError:
                     os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                    await process.wait()
         except:
             pass
 
-        if scheduler:
+        if scheduler and process is not None:
             scheduler.active_processes.discard(process)
-        active_processes.discard(process)
+        if process is not None:
+            active_processes.discard(process)
 
         with open(log_file, 'a') as f:
             f.write(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] TIMEOUT after {timeout_seconds} seconds\n")
@@ -230,9 +410,10 @@ async def run_command_async(command: str, log_file: str, timeout_seconds: int = 
         raise TimeoutError(f"Command timed out after {timeout_seconds} seconds")
     
     except Exception as e:
-        if scheduler:
+        if scheduler and process is not None:
             scheduler.active_processes.discard(process)
-        active_processes.discard(process)
+        if process is not None:
+            active_processes.discard(process)
 
         with open(log_file, 'a') as f:
             f.write(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ERROR: {str(e)}\n")
@@ -435,19 +616,33 @@ class AsyncTaskScheduler:
                            agent_framework: Optional[str] = None):
         """Actually run the task and collect result info."""
         if runner == "decoupled":
-            command = (
-                f"TOOLATHLON_PARENT_CAPTURES_RUN_LOG=1 "
-                f"bash scripts/run_single_decoupled.sh {task_dir_arg} {runmode} {dump_path} "
-                f"{model_short_name} {provider} {maxstep} {eval_config} {image_name}"
-            )
+            command = [
+                "bash",
+                "scripts/run_single_decoupled.sh",
+                task_dir_arg,
+                runmode,
+                dump_path,
+                model_short_name,
+                provider,
+                maxstep,
+                eval_config,
+                image_name,
+            ]
             if agent_framework:
-                command += f" {agent_framework}"
+                command.append(agent_framework)
         else:
-            command = (
-                f"TOOLATHLON_PARENT_CAPTURES_RUN_LOG=1 "
-                f"bash scripts/run_single_containerized.sh {task_dir_arg} {tag} {dump_path} "
-                f"{model_short_name} {provider} {maxstep} {eval_config} {image_name}"
-            )
+            command = [
+                "bash",
+                "scripts/run_single_containerized.sh",
+                task_dir_arg,
+                tag,
+                dump_path,
+                model_short_name,
+                provider,
+                maxstep,
+                eval_config,
+                image_name,
+            ]
 
         parts = task_dir_arg.split('/')
         if len(parts) >= 2:
@@ -467,14 +662,28 @@ class AsyncTaskScheduler:
         print(f"   📝 Log: {log_file}\n     Container log: {container_log_file}")
         if has_lock:
             print(f"   🔒 Running with conflict lock")
-        
+
+        signed_receipts = (
+            runner == "containerized"
+            and "TOOLATHLON_COMPLETION_RECEIPT_KEY_FILE" in os.environ
+        )
+        cleanup_marker = None
         try:
-            if runner == "containerized":
+            try:
+                _completion_receipt_path(dump_path, task_name).unlink(missing_ok=True)
+            except Exception as e:
+                raise RuntimeError(
+                    f"failed to revoke prior completion receipt for {task_name}: {e}"
+                ) from e
+            if signed_receipts:
                 try:
-                    completion_receipt_path(dump_path, task_name).unlink(missing_ok=True)
+                    cleanup_marker = _new_completion_cleanup_marker(
+                        dump_path, task_name
+                    )
                 except Exception as e:
                     raise RuntimeError(
-                        f"failed to clear stale completion receipt for {task_name}: {e}"
+                        f"failed to prepare signed completion receipt for "
+                        f"{task_name}: {e}"
                     ) from e
 
             self._archive_previous_results(dump_path, tasks_folder, task_name)
@@ -489,7 +698,16 @@ class AsyncTaskScheduler:
                         f"stale completion artifacts remain after archive for "
                         f"{task_name}: {', '.join(stale_artifacts)}"
                     )
-            result = await run_command_async(command, log_file, timeout_seconds=timeout, scheduler=self)
+            child_env = {"TOOLATHLON_PARENT_CAPTURES_RUN_LOG": "1"}
+            if cleanup_marker is not None:
+                child_env[COMPLETION_CLEANUP_MARKER_ENV] = str(cleanup_marker)
+            result = await run_command_async(
+                command,
+                log_file,
+                timeout_seconds=timeout,
+                scheduler=self,
+                extra_env=child_env,
+            )
 
             if (
                 runner == "containerized"
@@ -498,38 +716,47 @@ class AsyncTaskScheduler:
                 raise RuntimeError(
                     f"container cleanup could not be verified for {task_name}"
                 )
-            if runner == "containerized":
+            if signed_receipts:
+                if not _completion_cleanup_verified(cleanup_marker):
+                    raise RuntimeError(
+                        f"container cleanup was not positively verified for {task_name}"
+                    )
                 try:
                     write_completion_receipt(
                         dump_path,
                         task_name,
                         task_result_dir,
                         result["returncode"],
+                        completion_kind=COMPLETION_KIND_PROCESS_EXIT,
                     )
                 except Exception as e:
-                    if "TOOLATHLON_COMPLETION_RECEIPT_KEY_FILE" in os.environ:
-                        raise RuntimeError(
-                            f"failed to write signed completion receipt for "
-                            f"{task_name}: {e}"
-                        ) from e
-                    print(f"  ⚠️ Failed to write completion receipt for {task_name}: {e}")
-            
+                    raise RuntimeError(
+                        f"failed to write signed completion receipt for "
+                        f"{task_name}: {e}"
+                    ) from e
+
+            eval_res_file = os.path.join(dump_path, tasks_folder, task_name, "eval_res.json")
+            eval_res = None
+            if os.path.exists(eval_res_file):
+                eval_data = read_json(eval_res_file)
+                if isinstance(eval_data, dict) and isinstance(eval_data.get('pass'), bool):
+                    eval_res = eval_data['pass']
+
             self.completed_tasks += 1
             elapsed = (datetime.now() - task_start).total_seconds()
-            
+
             print(f"\n🔚 [{datetime.now().strftime('%H:%M:%S')}] SUCCESS: {task_dir_arg}")
             print(f"   ⏱️ Time: {elapsed:.1f}s | Progress: {self.completed_tasks}/{self.total_tasks}")
-            
-            eval_res_file = os.path.join(dump_path, tasks_folder, task_name, "eval_res.json")
-            eval_res = read_json(eval_res_file).get('pass', False) if os.path.exists(eval_res_file) else None
-            
-            if eval_res is None: 
+
+            if eval_res is None:
                 self.unknown_but_finished_tasks += 1
                 eval_res_emoji = "❓"
+            elif eval_res:
+                self.correct_tasks += 1
+                eval_res_emoji = "✅"
             else:
-                eval_res_emoji = "✅" if eval_res else "❌"
-            self.correct_tasks += 1 if eval_res else 0
-            self.incorrect_tasks += 1 if not eval_res else 0
+                self.incorrect_tasks += 1
+                eval_res_emoji = "❌"
             print(f"   🔍 Eval res: {eval_res_emoji}\n     Eval log: {eval_res_file}\n     Run log: {log_file}")
 
             return {
@@ -547,6 +774,7 @@ class AsyncTaskScheduler:
             self.timeout_tasks += 1
             self.failed_tasks += 1
             elapsed = (datetime.now() - task_start).total_seconds()
+            error_message = str(e)
 
             from utils.status_manager import TaskStatusManager
             try:
@@ -555,6 +783,21 @@ class AsyncTaskScheduler:
             except Exception:
                 pass
 
+            if signed_receipts and _completion_cleanup_verified(cleanup_marker):
+                try:
+                    write_completion_receipt(
+                        dump_path,
+                        task_name,
+                        task_result_dir,
+                        TIMEOUT_EXIT_CODE,
+                        completion_kind=COMPLETION_KIND_SCHEDULER_TIMEOUT,
+                    )
+                except Exception as receipt_error:
+                    error_message = (
+                        f"{error_message}; failed to write signed completion "
+                        f"receipt: {receipt_error}"
+                    )
+
             print(f"\n⏰ [{datetime.now().strftime('%H:%M:%S')}] TIMEOUT: {task_dir_arg}")
             print(f"   ⚠️ Killed after {elapsed:.1f}s (limit: {timeout}s) | Progress: {self.completed_tasks + self.failed_tasks}/{self.total_tasks}")
 
@@ -562,12 +805,11 @@ class AsyncTaskScheduler:
                 'task': task_dir_arg,
                 'status': 'timeout',
                 'elapsed': elapsed,
-                'error': str(e),
+                'error': error_message,
                 'log_file': log_file,
                 'tag': tag,
                 'model_short_name': model_short_name
             }
-            
         except Exception as e:
             self.failed_tasks += 1
             elapsed = (datetime.now() - task_start).total_seconds()
@@ -585,6 +827,9 @@ class AsyncTaskScheduler:
                 'tag': tag,
                 'model_short_name': model_short_name
             }
+        finally:
+            if cleanup_marker is not None:
+                cleanup_marker.unlink(missing_ok=True)
     
     def print_progress(self):
         """Print progress summary."""
@@ -602,7 +847,11 @@ class AsyncTaskScheduler:
         print(f"  Max concurrent workers: {self.max_workers}")
         print(f"{'='*60}\n")
 
-def filter_tasks_with_existing_results(all_task_dir_args: List[str], dump_path: str = "dumps") -> tuple[List[str], List[str]]:
+def filter_tasks_with_existing_results(
+    all_task_dir_args: List[str],
+    dump_path: str = "dumps",
+    require_completion_receipts: bool = False,
+) -> tuple[List[str], List[str]]:
     """
     Filter out tasks that already have valid results.
     Prefer status.json if exists; fallback to original logic if not.
@@ -624,6 +873,12 @@ def filter_tasks_with_existing_results(all_task_dir_args: List[str], dump_path: 
 
         task_dir = os.path.join(dump_path, tasks_folder, task_name)
         status_file = os.path.join(task_dir, "status.json")
+        has_required_receipt = (
+            not require_completion_receipts
+            or _has_valid_completion_receipt(
+                dump_path, task_name, Path(task_dir)
+            )
+        )
 
         # Prefer status.json
         if os.path.exists(status_file):
@@ -632,12 +887,17 @@ def filter_tasks_with_existing_results(all_task_dir_args: List[str], dump_path: 
                     status_data = json.load(f)
                 running_status = status_data.get('running', None)
                 preprocess_status = status_data.get('preprocess', None)
-                if running_status in ['timeout', 'max_turn_exceeded'] and preprocess_status == 'done':
+                if (
+                    running_status in ['timeout', 'max_turn_exceeded']
+                    and preprocess_status == 'done'
+                    and has_required_receipt
+                ):
                     tasks_already_completed.append(task_dir_arg)
                     continue
                 if (status_data.get('preprocess') == 'done' and
                     running_status == 'done' and
-                    status_data.get('evaluation') is not None):
+                    status_data.get('evaluation') is not None and
+                    has_required_receipt):
                     tasks_already_completed.append(task_dir_arg)
                     continue
                 else:
@@ -656,7 +916,7 @@ def filter_tasks_with_existing_results(all_task_dir_args: List[str], dump_path: 
             try:
                 with open(run_log_path, 'r') as f:
                     run_log_content = f.read()
-                if "raise MaxTurnsExceeded(" in run_log_content:
+                if "raise MaxTurnsExceeded(" in run_log_content and has_required_receipt:
                     tasks_already_completed.append(task_dir_arg)
                     continue
             except:
@@ -673,7 +933,7 @@ def filter_tasks_with_existing_results(all_task_dir_args: List[str], dump_path: 
                 with open(traj_log_path, 'r') as f:
                     log_data = json.load(f)
                 task_status = log_data.get('status', 'unknown')
-                if task_status == 'success':
+                if task_status == 'success' and has_required_receipt:
                     tasks_already_completed.append(task_dir_arg)
                 else:
                     tasks_to_execute.append(task_dir_arg)
@@ -759,12 +1019,17 @@ async def main():
     args = parser.parse_args()
 
     dump_path = args.dump_path if args.dump_path else "dumps"
-    if args.runner == "containerized":
+    signed_receipts = (
+        args.runner == "containerized"
+        and "TOOLATHLON_COMPLETION_RECEIPT_KEY_FILE" in os.environ
+    )
+    if signed_receipts:
         try:
             prepare_completion_receipt_dir(dump_path)
+            _read_completion_receipt_key()
         except Exception as e:
             raise SystemExit(
-                f"Error: could not prepare completion receipt directory: {e}"
+                f"Error: could not prepare signed completion receipts: {e}"
             ) from e
     
     # Generate tag or use provided
@@ -810,7 +1075,11 @@ async def main():
         print("No tasks found!")
         return
 
-    tasks_to_execute, tasks_already_completed = filter_tasks_with_existing_results(all_task_dir_args, dump_path)
+    tasks_to_execute, tasks_already_completed = filter_tasks_with_existing_results(
+        all_task_dir_args,
+        dump_path,
+        require_completion_receipts=signed_receipts,
+    )
 
     # Show filter results
     print(f"\n{'='*60}")
@@ -1063,10 +1332,21 @@ def sync_cleanup_processes():
     for process in processes_to_cleanup:
         try:
             if process.returncode is None:
-                print(f"  Force terminating process {process.pid}...")
+                print(f"  Terminating process {process.pid}...")
                 try:
-                    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-                    print(f"  ✅ Killed process group {process.pid}")
+                    process_group = os.getpgid(process.pid)
+                    os.killpg(process_group, signal.SIGTERM)
+                    deadline = time.monotonic() + 15
+                    while time.monotonic() < deadline:
+                        try:
+                            if psutil.Process(process.pid).status() == psutil.STATUS_ZOMBIE:
+                                break
+                        except psutil.NoSuchProcess:
+                            break
+                        time.sleep(0.1)
+                    else:
+                        os.killpg(process_group, signal.SIGKILL)
+                    print(f"  ✅ Terminated process group {process.pid}")
                 except:
                     process.kill()
                     print(f"  ✅ Killed process {process.pid}")
@@ -1100,9 +1380,11 @@ async def cleanup_single_process(process):
         if process.returncode is None:
             print(f"  Terminating process group {process.pid}...")
             os.killpg(os.getpgid(process.pid), signal.SIGTERM)
-            await asyncio.sleep(1)
-            if process.returncode is None:
+            try:
+                await asyncio.wait_for(process.wait(), timeout=15)
+            except asyncio.TimeoutError:
                 os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                await process.wait()
                 print(f"  Force killed process group {process.pid}")
             else:
                 print(f"  Gracefully terminated process group {process.pid}")

@@ -24,6 +24,7 @@ eval_config=${7:-"scripts/formal_run_v0.json"}
 image_name=${8:-"lockon0927/toolathlon-task-image:1016beta"}
 containerized_mode=${TOOLATHLON_CONTAINERIZED_MODE:-"phased"}
 parent_captures_run_log=${TOOLATHLON_PARENT_CAPTURES_RUN_LOG:-"0"}
+completion_cleanup_marker_file=${TOOLATHLON_COMPLETION_CLEANUP_MARKER_FILE:-""}
 UNSAFE_CLEANUP_EXIT_CODE=200
 
 case "$containerized_mode" in
@@ -155,6 +156,10 @@ fi
 ARTIFACT_STASH_DIR=""
 TRUSTED_STASH_DIR=""
 CURRENT_CONTAINER_BUNDLE=""
+CONTAINER_ID=""
+CONTAINER_CID_FILE=""
+CONTAINER_CID_DIR=""
+CONTAINER_LAUNCH_ATTEMPTED=0
 
 # Cleanup function
 cleanup() {
@@ -164,10 +169,38 @@ cleanup() {
     echo ""
     echo "Performing cleanup..."
 
-    if [ -n "$CURRENT_CONTAINER_BUNDLE" ]; then
-        $CONTAINER_RUNTIME exec "$CONTAINER_NAME" rm -f -- "$CURRENT_CONTAINER_BUNDLE" >/dev/null 2>&1 || true
-        CURRENT_CONTAINER_BUNDLE=""
+    # Quiesce and remove the task container first. The parent waits for this
+    # trap before trusting any task artifacts.
+    if [ -z "$CONTAINER_ID" ] && [ -n "$CONTAINER_CID_FILE" ] && [ -s "$CONTAINER_CID_FILE" ]; then
+        recovered_container_id=$(head -n 1 "$CONTAINER_CID_FILE" 2>/dev/null)
+        if [[ "$recovered_container_id" =~ ^[a-f0-9]{12,64}$ ]]; then
+            CONTAINER_ID="$recovered_container_id"
+        fi
     fi
+    if [ -n "$CONTAINER_CID_FILE" ]; then
+        rm -f -- "$CONTAINER_CID_FILE"
+        CONTAINER_CID_FILE=""
+    fi
+    if [ -n "$CONTAINER_CID_DIR" ]; then
+        rmdir -- "$CONTAINER_CID_DIR" >/dev/null 2>&1 || true
+        CONTAINER_CID_DIR=""
+    fi
+
+    if [ -n "$CONTAINER_ID" ]; then
+        $CONTAINER_RUNTIME stop -t 0 "$CONTAINER_ID" >/dev/null 2>&1 || true
+        $CONTAINER_RUNTIME rm -f "$CONTAINER_ID" >/dev/null 2>&1 || true
+        remaining_container_ids=$($CONTAINER_RUNTIME ps -aq --no-trunc --filter "id=$CONTAINER_ID" 2>/dev/null)
+        container_query_exit_code=$?
+    elif [ "$CONTAINER_LAUNCH_ATTEMPTED" -eq 1 ]; then
+        # A failed `run` without a cidfile is ambiguous. Never delete by name:
+        # it may belong to another run (for example, a name collision).
+        remaining_container_ids="unknown"
+        container_query_exit_code=1
+    else
+        remaining_container_ids=""
+        container_query_exit_code=0
+    fi
+    CURRENT_CONTAINER_BUNDLE=""
 
     if [ -n "$ARTIFACT_STASH_DIR" ]; then
         uv run python -m scripts.containerized.task_artifact_guard cleanup \
@@ -181,20 +214,23 @@ cleanup() {
         TRUSTED_STASH_DIR=""
     fi
 
-    # Stop/remove by exact name even when the container was never created, then
-    # fail closed unless the runtime can confirm that it is gone.
-    $CONTAINER_RUNTIME stop "$CONTAINER_NAME" >/dev/null 2>&1 || true
-    $CONTAINER_RUNTIME rm "$CONTAINER_NAME" >/dev/null 2>&1 || true
-    remaining_container_ids=$($CONTAINER_RUNTIME ps -aq --filter "name=$CONTAINER_NAME" 2>/dev/null)
-    container_query_exit_code=$?
+    # Fail closed unless the runtime can confirm that the exact task container
+    # is gone.
     if [ "$container_query_exit_code" -ne 0 ]; then
-        echo "  Error: failed to verify container cleanup: $CONTAINER_NAME" >&2
+        echo "  Error: failed to verify container cleanup: ${CONTAINER_ID:-container launch}" >&2
         cleanup_exit_code=$UNSAFE_CLEANUP_EXIT_CODE
     elif [ -n "$remaining_container_ids" ]; then
-        echo "  Error: container still exists after cleanup: $CONTAINER_NAME" >&2
+        echo "  Error: container still exists after cleanup: ${CONTAINER_ID:-container launch}" >&2
         cleanup_exit_code=$UNSAFE_CLEANUP_EXIT_CODE
     else
         echo "  ✓ Container absence verified"
+        if [ -n "$completion_cleanup_marker_file" ]; then
+            umask 077
+            if ! printf 'container-absent\n' > "$completion_cleanup_marker_file"; then
+                echo "  Error: failed to record verified container cleanup" >&2
+                cleanup_exit_code=$UNSAFE_CLEANUP_EXIT_CODE
+            fi
+        fi
     fi
     echo "Cleanup completed"
     exit "$cleanup_exit_code"
@@ -252,10 +288,17 @@ echo "Preparing to start container..."
 # Step 1: Start container and keep it running
 echo "Step 1: Starting container and keeping it running..."
 
+CONTAINER_CID_DIR=$(mktemp -d "${TMPDIR:-/tmp}/toolathlon-container.XXXXXX")
+chmod 700 "$CONTAINER_CID_DIR"
+# Docker requires --cidfile to name a path that does not exist yet. Keeping it
+# inside a private directory prevents another local process from claiming it.
+CONTAINER_CID_FILE="$CONTAINER_CID_DIR/container.cid"
+
 # Container startup parameters (only start and keep alive, do not execute task yet)
 START_CONTAINER_ARGS=(
     "$CONTAINER_RUNTIME" "run"
     "-d"  # Run in background
+    "--cidfile" "$CONTAINER_CID_FILE"
     "--name" "$CONTAINER_NAME"
     "--network" "host" # Use host network for Kind cluster access
 )
@@ -351,13 +394,32 @@ echo ""
 
 # Start the container
 echo "Starting container..."
-CONTAINER_ID=$("${START_CONTAINER_ARGS[@]}")
+CONTAINER_LAUNCH_ATTEMPTED=1
+set +e
+CONTAINER_OUTPUT=$("${START_CONTAINER_ARGS[@]}")
 START_EXIT_CODE=$?
+set -e
+if [ -s "$CONTAINER_CID_FILE" ]; then
+    CONTAINER_ID=$(head -n 1 "$CONTAINER_CID_FILE")
+fi
+rm -f -- "$CONTAINER_CID_FILE"
+CONTAINER_CID_FILE=""
+rmdir -- "$CONTAINER_CID_DIR" >/dev/null 2>&1 || true
+CONTAINER_CID_DIR=""
+if [[ ! "$CONTAINER_ID" =~ ^[a-f0-9]{12,64}$ ]]; then
+    CONTAINER_ID=""
+    if [ "$START_EXIT_CODE" -eq 0 ]; then
+        START_EXIT_CODE=1
+    fi
+fi
 
 if [ $START_EXIT_CODE -eq 0 ]; then
     echo "✓ Container started successfully"
     echo "  Container ID: $CONTAINER_ID"
     echo "  Container name: $CONTAINER_NAME"
+    # From this point on, target the container only by the immutable ID. The
+    # task has access to the runtime socket and can rename or reuse a name.
+    CONTAINER_NAME="$CONTAINER_ID"
 else
     echo "✗ Container startup failed, exit code: $START_EXIT_CODE"
     exit $START_EXIT_CODE
@@ -373,7 +435,7 @@ CONTAINER_READY=false
 
 while [ $WAIT_COUNT -lt $MAX_WAIT ]; do
     # Check if container is still running
-    if $CONTAINER_RUNTIME ps -q --filter "name=$CONTAINER_NAME" | grep -q .; then
+    if $CONTAINER_RUNTIME ps -q --no-trunc --filter "id=$CONTAINER_ID" | grep -q .; then
         # Verify basic exec in container
         if $CONTAINER_RUNTIME exec "$CONTAINER_NAME" echo "container ready" >/dev/null 2>&1; then
             CONTAINER_READY=true
