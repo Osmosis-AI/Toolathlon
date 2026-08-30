@@ -1,0 +1,23 @@
+run_parallel.py
+  s_82e814b9efbebd::t_69754f5df229c2 481-491
+  s_82e814b9efbebd::t_79a1e039eff7f1 510-514
+scripts/containerized/tests/test_completion_receipt.py
+  s_82e814b9efbebd::t_69754f5df229c2 269-302
+  s_82e814b9efbebd::t_79a1e039eff7f1 309,316-326,331-364
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "ffa251cd5dfa621021774553fa4c1c38d8796810",
+  "prompts": {},
+  "sessions": {
+    "s_82e814b9efbebd": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a05202-f0e3-7183-a60b-b0795046fbb7",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "JoyboyBrian <gzybrian@gmail.com>"
+    }
+  }
+}
