@@ -1,0 +1,37 @@
+global_preparation/install_env_minimal.sh
+  s_15aefbbd5a50dd::t_d74a87ff7f2395 114-118,142-146,165
+deployment/k8s/scripts/prepare.sh
+  s_15aefbbd5a50dd::t_d74a87ff7f2395 41-45,74-92,98-99,117-135,141-142,144
+  s_15aefbbd5a50dd::t_aecf34cb81b0f1 46-72
+  s_15aefbbd5a50dd::t_3c6db404bc4628 103-106,108-115
+  s_15aefbbd5a50dd::t_df5f5ec4f5218d 24,30,97,140
+  s_15aefbbd5a50dd::t_5b92b3526eadf4 93-96,100
+  s_15aefbbd5a50dd::t_7484896436f455 107,136-139,143
+tests/test_k8s_prepare.sh
+  s_15aefbbd5a50dd::t_08a746bfb61fd2 197-206
+  s_15aefbbd5a50dd::t_aa7290d28967fc 13,44,51-55,115-116,125,134-135,150-151,159
+  s_15aefbbd5a50dd::t_3c6db404bc4628 121,123,128,136,166,240-243,245-246,250-255
+  s_15aefbbd5a50dd::t_947432f4f490ee 124,127,137-149,152-158,160-162
+  s_15aefbbd5a50dd::t_e521486a8c1515 247-249
+  s_15aefbbd5a50dd::t_0507d80b55144e 12,46,71-80,102
+  s_15aefbbd5a50dd::t_3de494ac81be61 181-182,196,207-239
+  s_15aefbbd5a50dd::t_a0b80cd41f8c41 117-120
+  s_15aefbbd5a50dd::t_6ceadade540d2c 129-133,244
+  s_15aefbbd5a50dd::t_2790d8d8ae5fb0 1-11,14-43,45,47-50,56-70,81-101,103-114,122,126,163-165,167-180,183-195,256-324
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "042a22baa3e23ecba9535171384d5008fd97f75b",
+  "prompts": {},
+  "sessions": {
+    "s_15aefbbd5a50dd": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a05522-3db4-7372-98af-8e35e204eddc",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "JoyboyBrian <gzybrian@gmail.com>"
+    }
+  }
+}
