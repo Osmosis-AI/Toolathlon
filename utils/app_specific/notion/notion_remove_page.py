@@ -12,16 +12,34 @@ Environment Variables:
 import os
 import sys
 import argparse
+import re
 import requests
 from urllib.parse import urlparse
 
+_PAGE_ID_AT_END = re.compile(
+    r"(?i)(?<![0-9a-f])"
+    r"([0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+    r"[0-9a-f]{4}-[0-9a-f]{12})$"
+)
+
+
+def _raise_for_non_2xx(response, action):
+    if not 200 <= response.status_code < 300:
+        raise requests.HTTPError(
+            f"{action} failed with HTTP {response.status_code}", response=response
+        )
+
+
 def get_page_id_from_url(url):
-    """Extract page ID from URL"""
-    path = urlparse(url).path
-    page_id = path.split('-')[-1]
-    if len(page_id) == 32:
-        return f"{page_id[:8]}-{page_id[8:12]}-{page_id[12:16]}-{page_id[16:20]}-{page_id[20:32]}"
-    return page_id
+    """Extract and normalize the terminal Notion page ID from a URL or bare ID."""
+    path = urlparse(url).path.rstrip("/")
+    match = _PAGE_ID_AT_END.search(path)
+    if not match:
+        raise ValueError("URL does not end with a valid Notion page ID")
+
+    page_id = match.group(1).replace("-", "").lower()
+    return f"{page_id[:8]}-{page_id[8:12]}-{page_id[12:16]}-{page_id[16:20]}-{page_id[20:32]}"
+
 
 def get_child_pages(parent_id, headers):
     """Get all child pages"""
@@ -36,12 +54,11 @@ def get_child_pages(parent_id, headers):
         if start_cursor:
             params["start_cursor"] = start_cursor
             
-        response = requests.get(url, headers=headers, params=params)
+        response = requests.get(
+            url, headers=headers, params=params, allow_redirects=False
+        )
         
-        if response.status_code != 200:
-            print(f"Error: Unable to get child pages - {response.status_code}")
-            print(f"Response: {response.text}")
-            return []
+        _raise_for_non_2xx(response, "Getting child pages")
             
         data = response.json()
         
@@ -95,13 +112,11 @@ def delete_pages_by_title(parent_id, target_title, headers, dry_run=False):
     
     for page_id, title in pages_to_delete:
         delete_url = f"https://api.notion.com/v1/blocks/{page_id}"
-        response = requests.delete(delete_url, headers=headers)
+        response = requests.delete(delete_url, headers=headers, allow_redirects=False)
         
-        if response.status_code == 200:
-            print(f"✓ Deleted: {title}")
-            deleted_count += 1
-        else:
-            print(f"✗ Deletion failed: {title} - {response.status_code}: {response.text}")
+        _raise_for_non_2xx(response, f"Deleting page {page_id}")
+        print(f"✓ Deleted: {title}")
+        deleted_count += 1
     
     return deleted_count
 

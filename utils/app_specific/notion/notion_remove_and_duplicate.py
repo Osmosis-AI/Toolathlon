@@ -2,6 +2,8 @@ import sys
 import os
 from argparse import ArgumentParser
 import asyncio
+import shlex
+
 # Add utils to path
 sys.path.append(os.path.dirname(__file__))
 
@@ -24,33 +26,34 @@ async def main():
     notion_integration_key_eval_only = all_token_key_session.notion_integration_key_eval
 
     print_color(f"Removing old page {args.needed_subpage_name} from {notion_eval_page_url}","cyan")
-    await run_command(
+    _, _, cleanup_return_code = await run_command(
         f"uv run -m utils.app_specific.notion.notion_remove_page "
-        f"--url {notion_eval_page_url} "
-        f"--name \"{args.needed_subpage_name}\" "
-        f"--token {notion_integration_key_eval_only} "
+        f"--url {shlex.quote(notion_eval_page_url)} "
+        f"--name {shlex.quote(args.needed_subpage_name)} "
+        f"--token {shlex.quote(notion_integration_key_eval_only)} "
         f"--no-confirm",
-        debug=True,
+        debug=False,
         show_output=True
     )
+    if cleanup_return_code != 0:
+        raise RuntimeError(
+            f"Removing old Notion page failed with exit code {cleanup_return_code}"
+        )
 
     print_color(f"Duplicating new page {args.needed_subpage_name} from {notion_source_page_url} to {notion_eval_page_url}","cyan")
-    await run_command(
+    _, _, duplicate_return_code = await run_command(
         f"uv run -m utils.app_specific.notion.notion_page_duplicator "
-        f"--source-parent {notion_source_page_url} "
-        f"--child-name \"{args.needed_subpage_name}\" "
-        f"--target-parent {notion_eval_page_url} "
-        f"--notion-key {notion_integration_key} "
-        f"--output-file {args.duplicated_page_id_file}",
-        debug=True,
+        f"--source-parent {shlex.quote(notion_source_page_url)} "
+        f"--child-name {shlex.quote(args.needed_subpage_name)} "
+        f"--target-parent {shlex.quote(notion_eval_page_url)} "
+        f"--notion-key {shlex.quote(notion_integration_key)} "
+        f"--output-file {shlex.quote(args.duplicated_page_id_file)}",
+        debug=False,
         show_output=True
     )
+    if duplicate_return_code != 0:
+        raise RuntimeError(f"Duplicating Notion page failed with exit code {duplicate_return_code}")
     # print("Preprocess done!")
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
-
-
-    
