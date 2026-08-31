@@ -135,7 +135,13 @@ MAX_DEPLOY_ATTEMPTS=2          # how many times to (re)run the full setup
 READINESS_TIMEOUT_SECONDS=1800 # 30 min: matches the outer asyncio cap in _deploy_infrastructure
 PROBE_INTERVAL_SECONDS=5
 
-KIND_CLUSTER_NAME="cluster${instance_suffix}1-control-plane"
+KIND_LOGICAL_CLUSTER_NAME="cluster${instance_suffix}1"
+KIND_CLUSTER_NAME="${KIND_LOGICAL_CLUSTER_NAME}-control-plane"
+
+# Keep the complete final-attempt block inside the monolith wrapper's
+# 2,000-character stdout tail, leaving room for the terminal error/timing lines.
+SETUP_DIAGNOSTIC_MAX_BYTES=1600
+SETUP_LOG_EXCERPT_BYTES=900
 
 # ---------------------------------------------------------------------------
 # Readiness probes — each returns 0 if the service is up and serving.
@@ -252,20 +258,137 @@ run_setup() {
     for c in k8s canvas poste woo; do
         rc=$(cat "$logdir/$c.rc" 2>/dev/null || echo "?")
         [ "$rc" != "0" ] && any_fail=1
-        echo ""
-        echo "----- [$c] setup.sh exit=$rc -----"
-        sed "s|^|[$c] |" "$logdir/$c.log" 2>/dev/null || true
     done
 
-    # Keep $logdir on disk for post-mortem (logs are tiny).  Each new deploy
+    # Preserve the existing successful-deploy output.  On failure, the caller
+    # emits only bounded excerpts from nonzero components; replaying every full
+    # log here would bury the teardown-before-retry snapshot.
+    if [ "$any_fail" -eq 0 ]; then
+        for c in k8s canvas poste woo; do
+            rc=$(cat "$logdir/$c.rc" 2>/dev/null || echo "?")
+            echo ""
+            echo "----- [$c] setup.sh exit=$rc -----"
+            sed "s|^|[$c] |" "$logdir/$c.log" 2>/dev/null || true
+        done
+    fi
+
+    # Keep $logdir on disk for post-mortem.  Each new deploy
     # makes a fresh dir; old ones can be reaped manually if needed.
     echo ""
     echo "  parallel setup logs preserved at: $logdir"
+
+    LAST_SETUP_LOGDIR=$logdir
 
     # Propagate setup.sh failure: tells the retry loop to skip the 30-min
     # readiness wait and either rerun setup or fail fast.  Without this, a
     # `kind create` failure would stay invisible until readiness times out.
     return $any_fail
+}
+
+sanitize_setup_excerpt() {
+    LC_ALL=C awk '
+        {
+            line = $0
+            lower = tolower(line)
+            sensitive = \
+                lower ~ /(oauth|authorization|token|password|secret|credential|cookie|api[-_ ]*key|private[-_ ]*key|access[-_ ]*key)/ || \
+                lower ~ /^[[:space:]]*export([[:space:]]|$)/ || \
+                lower ~ /^[[:space:]]*env([[:space:]]|$)/ || \
+                line ~ /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=/ || \
+                lower ~ /(^|[^a-z])(config|configuration|environment dump|env dump)([^a-z]|$)/
+            if (sensitive) {
+                printf "<sensitive-line-redacted> "
+                next
+            }
+            gsub(/[[:cntrl:]]/, "", line)
+            gsub(/[A-Za-z][A-Za-z0-9+.-]*:\/\/[^[:space:]]+/, "<url-redacted>", line)
+            printf "%s ", line
+        }
+    '
+}
+
+emit_setup_diagnostics() {
+    local logdir=$1 attempt_number=$2
+    local diagnostic_file="$logdir/setup-diagnostics.txt"
+    local c rc failed_count=0
+    local kind_clusters logical_status container_status sysctl_key sysctl_value
+    local fixed_bytes remaining chunk_bytes log_bytes middle
+    local overhead_bytes=0 line_bytes end_bytes
+
+    for c in k8s canvas poste woo; do
+        rc=$(cat "$logdir/$c.rc" 2>/dev/null || echo "?")
+        if [ "$rc" != "0" ]; then
+            failed_count=$((failed_count + 1))
+            line_bytes=$(printf '[%s] log head: \n[%s] log middle: omitted\n[%s] log tail: \n' "$c" "$c" "$c" | wc -c)
+            overhead_bytes=$((overhead_bytes + line_bytes))
+        fi
+    done
+
+    if kind_clusters=$(KIND_EXPERIMENTAL_PROVIDER="$CTR" kind get clusters 2>/dev/null); then
+        if printf '%s\n' "$kind_clusters" | grep -Fxq "$KIND_LOGICAL_CLUSTER_NAME"; then
+            logical_status=present
+        else
+            logical_status=absent
+        fi
+    else
+        logical_status=unavailable
+    fi
+    if ! container_status=$($CTR inspect --format '{{.State.Status}} exit={{.State.ExitCode}}' "$KIND_CLUSTER_NAME" 2>/dev/null); then
+        container_status=unavailable
+    elif [ -z "$container_status" ]; then
+        container_status=unknown
+    fi
+
+    {
+        echo "=== setup diagnostics attempt=$attempt_number ==="
+        printf 'components:'
+        for c in k8s canvas poste woo; do
+            rc=$(cat "$logdir/$c.rc" 2>/dev/null || echo "?")
+            printf ' %s=%s' "$c" "$rc"
+        done
+        echo ""
+        echo "kind: logical_cluster=$KIND_LOGICAL_CLUSTER_NAME status=$logical_status container=$KIND_CLUSTER_NAME status=$container_status"
+        printf 'sysctl:'
+        for sysctl_key in \
+            fs.inotify.max_user_watches \
+            fs.inotify.max_user_instances \
+            fs.inotify.max_queued_events \
+            user.max_user_namespaces; do
+            sysctl_value=$(sysctl -n "$sysctl_key" 2>/dev/null || echo unavailable)
+            printf ' %s=%s' "$sysctl_key" "$sysctl_value"
+        done
+        echo ""
+    } > "$diagnostic_file"
+
+    fixed_bytes=$(wc -c < "$diagnostic_file")
+    end_bytes=$(printf '=== setup diagnostics end ===\n' | wc -c)
+    remaining=$((SETUP_DIAGNOSTIC_MAX_BYTES - fixed_bytes - overhead_bytes - end_bytes))
+    [ "$remaining" -gt "$SETUP_LOG_EXCERPT_BYTES" ] && remaining=$SETUP_LOG_EXCERPT_BYTES
+    if [ "$failed_count" -gt 0 ] && [ "$remaining" -gt 0 ]; then
+        chunk_bytes=$((remaining / failed_count / 2))
+        [ "$chunk_bytes" -lt 1 ] && chunk_bytes=1
+
+        for c in k8s canvas poste woo; do
+            rc=$(cat "$logdir/$c.rc" 2>/dev/null || echo "?")
+            [ "$rc" = "0" ] && continue
+            log_bytes=$(wc -c < "$logdir/$c.log" 2>/dev/null || echo 0)
+            if [ "$log_bytes" -gt $((chunk_bytes * 2)) ]; then
+                middle=omitted
+            else
+                middle=none
+            fi
+            printf '[%s] log head: ' "$c" >> "$diagnostic_file"
+            sanitize_setup_excerpt < "$logdir/$c.log" 2>/dev/null \
+                | head -c "$chunk_bytes" >> "$diagnostic_file"
+            printf '\n[%s] log middle: %s\n[%s] log tail: ' "$c" "$middle" "$c" >> "$diagnostic_file"
+            sanitize_setup_excerpt < "$logdir/$c.log" 2>/dev/null \
+                | tail -c "$chunk_bytes" >> "$diagnostic_file"
+            echo "" >> "$diagnostic_file"
+        done
+    fi
+    echo "=== setup diagnostics end ===" >> "$diagnostic_file"
+
+    cat "$diagnostic_file"
 }
 
 # ---------------------------------------------------------------------------
@@ -366,6 +489,10 @@ while [ $attempt -le $MAX_DEPLOY_ATTEMPTS ]; do
     else
         retry_reason="one or more setup.sh scripts reported failure"
     fi
+
+    # Capture the failed attempt before the next setup.sh can tear it down.
+    # This also places the final-attempt snapshot immediately before exit 1.
+    emit_setup_diagnostics "$LAST_SETUP_LOGDIR" "$attempt"
 
     if [ $attempt -ge $MAX_DEPLOY_ATTEMPTS ]; then
         echo "ERROR: $retry_reason after $MAX_DEPLOY_ATTEMPTS attempts. Giving up."
