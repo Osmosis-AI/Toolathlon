@@ -111,6 +111,11 @@ npm install
 echo "Tip: To support multiple k8s tasks, it is recommended to adjust inotify parameters. Please make sure you have sudo privileges."
 if [ "$WITH_SUDO" = true ]; then
     bash deployment/k8s/scripts/prepare.sh --sudo
+    PREPARE_STATUS=$?
+    if [ "$PREPARE_STATUS" -ne 0 ]; then
+        echo "Kubernetes tooling preparation failed (exit $PREPARE_STATUS)." >&2
+        exit "$PREPARE_STATUS"
+    fi
     echo "Configuring inotify directly via sudo..."
     SYSCTL_CONF="/etc/sysctl.conf"
     declare -A inotify_settings=(
@@ -134,6 +139,11 @@ if [ "$WITH_SUDO" = true ]; then
     sudo sysctl -p
 else
     bash deployment/k8s/scripts/prepare.sh --no-sudo
+    PREPARE_STATUS=$?
+    if [ "$PREPARE_STATUS" -ne 0 ]; then
+        echo "Kubernetes tooling preparation failed (exit $PREPARE_STATUS)." >&2
+        exit "$PREPARE_STATUS"
+    fi
     YELLOW='\033[1;33m'
     RESET='\033[0m'
     echo -e "${YELLOW}===============YOU SEE THIS CUZ YOU ARE NOT RUNNING AS ROOT/SUDO==============="
