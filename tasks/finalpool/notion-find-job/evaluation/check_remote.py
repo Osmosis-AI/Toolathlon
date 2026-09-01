@@ -1,15 +1,7 @@
 import requests
 import sys
 import os
-import re
 from typing import Callable, Dict, List, Tuple, Optional
-from urllib.parse import urlparse
-
-
-_NOTION_PAGE_ID = re.compile(
-    r"(?i)([0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
-    r"[0-9a-f]{4}-[0-9a-f]{12})$"
-)
 
 
 def _normalize_page_id(value: str) -> str:
@@ -17,27 +9,16 @@ def _normalize_page_id(value: str) -> str:
     if not isinstance(value, str):
         raise ValueError("Notion page ID is not a string")
 
-    match = _NOTION_PAGE_ID.fullmatch(value.strip())
-    if not match:
+    compact = value.strip().replace('-', '').lower()
+    if len(compact) != 32 or any(
+        character not in '0123456789abcdef' for character in compact
+    ):
         raise ValueError("Notion page ID is malformed")
 
-    compact = match.group(1).replace('-', '').lower()
     return (
         f"{compact[:8]}-{compact[8:12]}-{compact[12:16]}-"
         f"{compact[16:20]}-{compact[20:]}"
     )
-
-
-def _page_id_from_url(url: str) -> str:
-    """Extract the terminal page ID from a configured Notion page URL."""
-    if not isinstance(url, str):
-        raise ValueError("Notion eval page URL is not a string")
-
-    path = urlparse(url.strip()).path.rstrip('/')
-    match = _NOTION_PAGE_ID.search(path)
-    if not match:
-        raise ValueError("Notion eval page URL has no terminal page ID")
-    return _normalize_page_id(match.group(1))
 
 
 def _get_page_title(page: Dict) -> str:
@@ -70,11 +51,11 @@ def _load_duplicated_page_id(task_root: str) -> str:
 
 
 def _get_attributed_job_finder_page(
-    task_root: str, notion_token: str, eval_page_url: str
+    task_root: str, notion_token: str, eval_page_id: str
 ) -> Dict:
     """Retrieve and validate the task-local Job Finder page and its parent."""
     task_page_id = _load_duplicated_page_id(task_root)
-    expected_parent_id = _page_id_from_url(eval_page_url)
+    expected_parent_id = _normalize_page_id(eval_page_id)
 
     task_page = get_notion_page_properties(task_page_id, notion_token)
     if _get_page_title(task_page) != 'Job Finder':
@@ -497,6 +478,10 @@ def check_remote(agent_workspace: str, groundtruth_workspace: str, res_log: dict
         print(f"Added directory to sys.path: {grandparent_dir}")
 
         import configs.token_key_session as configs
+        from utils.app_specific.notion.notion_page_protector import (
+            NotionPageProtector,
+        )
+
         notion_token = getattr(configs.all_token_key_session, 'notion_integration_key', None)
         eval_page_url = getattr(configs.all_token_key_session, 'eval_notion_page_url', None)
         
@@ -507,8 +492,11 @@ def check_remote(agent_workspace: str, groundtruth_workspace: str, res_log: dict
         
         print("=== Starting Notion Database Remote Check ===")
         task_root = parent_dir
+        eval_page_id = NotionPageProtector.extract_page_id_from_url(
+            eval_page_url
+        )
         job_finder_page = _get_attributed_job_finder_page(
-            task_root, notion_token, eval_page_url
+            task_root, notion_token, eval_page_id
         )
         print(f"Using Job Finder page: {job_finder_page['title']} (ID: {job_finder_page['id']})")
         

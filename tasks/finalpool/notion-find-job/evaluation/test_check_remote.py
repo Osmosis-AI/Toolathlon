@@ -15,10 +15,6 @@ from check_remote import (
 EVAL_PAGE_ID = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
 TASK_PAGE_ID = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
 FOREIGN_PAGE_ID = 'cccccccc-cccc-cccc-cccc-cccccccccccc'
-EVAL_PAGE_URL = (
-    'https://www.notion.so/Notion-Eval-Page-'
-    + EVAL_PAGE_ID.replace('-', '')
-)
 
 
 def _response(payload):
@@ -72,7 +68,7 @@ class SlotAttributionTests(unittest.TestCase):
         get_page.side_effect = lambda page_id, _token: pages_by_id[page_id]
 
         page = _get_attributed_job_finder_page(
-            self._task_root(), 'token', EVAL_PAGE_URL
+            self._task_root(), 'token', EVAL_PAGE_ID
         )
 
         self.assertEqual(page, {'id': TASK_PAGE_ID, 'title': 'Job Finder'})
@@ -88,7 +84,7 @@ class SlotAttributionTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, 'parent does not match'):
             _get_attributed_job_finder_page(
-                self._task_root(), 'token', EVAL_PAGE_URL
+                self._task_root(), 'token', EVAL_PAGE_ID
             )
 
         get_page.assert_called_once_with(TASK_PAGE_ID, 'token')
@@ -102,7 +98,7 @@ class SlotAttributionTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, 'title is not exactly'):
             _get_attributed_job_finder_page(
-                self._task_root(), 'token', EVAL_PAGE_URL
+                self._task_root(), 'token', EVAL_PAGE_ID
             )
 
     @patch('check_remote.get_notion_page_properties')
@@ -111,7 +107,7 @@ class SlotAttributionTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "not exactly 'Job Finder'"):
             _get_attributed_job_finder_page(
-                self._task_root(), 'token', EVAL_PAGE_URL
+                self._task_root(), 'token', EVAL_PAGE_ID
             )
 
     def test_missing_task_local_page_id_fails_closed(self):
@@ -120,15 +116,19 @@ class SlotAttributionTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, 'file is unavailable'):
             _get_attributed_job_finder_page(
-                temp_dir.name, 'token', EVAL_PAGE_URL
+                temp_dir.name, 'token', EVAL_PAGE_ID
             )
 
     def test_malformed_task_local_page_id_fails_closed(self):
-        for malformed_id in ('', 'not-a-page-id', EVAL_PAGE_URL):
+        for malformed_id in (
+            '',
+            'not-a-page-id',
+            'https://www.notion.so/' + EVAL_PAGE_ID.replace('-', ''),
+        ):
             with self.subTest(malformed_id=malformed_id):
                 with self.assertRaisesRegex(ValueError, 'page ID is malformed'):
                     _get_attributed_job_finder_page(
-                        self._task_root(malformed_id), 'token', EVAL_PAGE_URL
+                        self._task_root(malformed_id), 'token', EVAL_PAGE_ID
                     )
 
 
