@@ -4,6 +4,81 @@ import os
 from typing import Callable, Dict, List, Tuple, Optional
 
 
+def _normalize_page_id(value: str) -> str:
+    """Return a canonical Notion page ID, rejecting non-ID input."""
+    if not isinstance(value, str):
+        raise ValueError("Notion page ID is not a string")
+
+    compact = value.strip().replace('-', '').lower()
+    if len(compact) != 32 or any(
+        character not in '0123456789abcdef' for character in compact
+    ):
+        raise ValueError("Notion page ID is malformed")
+
+    return (
+        f"{compact[:8]}-{compact[8:12]}-{compact[12:16]}-"
+        f"{compact[16:20]}-{compact[20:]}"
+    )
+
+
+def _get_page_title(page: Dict) -> str:
+    """Extract a normal Notion page title from an API page response."""
+    properties = page.get('properties', {})
+    if not isinstance(properties, dict):
+        return ''
+
+    for prop in properties.values():
+        if not isinstance(prop, dict) or prop.get('type') != 'title':
+            continue
+        title_parts = prop.get('title', [])
+        if not isinstance(title_parts, list):
+            return ''
+        return ''.join(
+            part.get('plain_text', part.get('text', {}).get('content', ''))
+            for part in title_parts
+            if isinstance(part, dict)
+        )
+    return ''
+
+
+def _load_duplicated_page_id(task_root: str) -> str:
+    page_id_path = os.path.join(task_root, 'files', 'duplicated_page_id.txt')
+    try:
+        with open(page_id_path, 'r', encoding='utf-8') as page_id_file:
+            return _normalize_page_id(page_id_file.read())
+    except OSError as exc:
+        raise ValueError("Duplicated Notion page ID file is unavailable") from exc
+
+
+def _get_attributed_job_finder_page(
+    task_root: str, notion_token: str, eval_page_id: str
+) -> Dict:
+    """Retrieve and validate the task-local Job Finder page and its parent."""
+    task_page_id = _load_duplicated_page_id(task_root)
+    expected_parent_id = _normalize_page_id(eval_page_id)
+
+    task_page = get_notion_page_properties(task_page_id, notion_token)
+    if _get_page_title(task_page) != 'Job Finder':
+        raise ValueError("Duplicated Notion page title is not exactly 'Job Finder'")
+
+    parent = task_page.get('parent', {})
+    if not isinstance(parent, dict) or parent.get('type') != 'page_id':
+        raise ValueError("Duplicated Notion page does not have a page parent")
+
+    try:
+        actual_parent_id = _normalize_page_id(parent.get('page_id'))
+    except ValueError as exc:
+        raise ValueError("Duplicated Notion page parent ID is malformed") from exc
+    if actual_parent_id != expected_parent_id:
+        raise ValueError("Duplicated Notion page parent does not match the configured eval page")
+
+    parent_page = get_notion_page_properties(expected_parent_id, notion_token)
+    if _get_page_title(parent_page) != 'Notion Eval Page':
+        raise ValueError("Configured Notion eval page title is not exactly 'Notion Eval Page'")
+
+    return {'id': task_page_id, 'title': 'Job Finder'}
+
+
 def _collect_paginated_results(
     fetch_page: Callable[[Optional[str]], Dict], resource_name: str
 ) -> Dict:
@@ -403,56 +478,26 @@ def check_remote(agent_workspace: str, groundtruth_workspace: str, res_log: dict
         print(f"Added directory to sys.path: {grandparent_dir}")
 
         import configs.token_key_session as configs
+        from utils.app_specific.notion.notion_page_protector import (
+            NotionPageProtector,
+        )
+
         notion_token = getattr(configs.all_token_key_session, 'notion_integration_key', None)
+        eval_page_url = getattr(configs.all_token_key_session, 'eval_notion_page_url', None)
         
         if not notion_token:
             return False, "No Notion token available for remote check"
+        if not eval_page_url:
+            return False, "No Notion eval page URL available for remote check"
         
         print("=== Starting Notion Database Remote Check ===")
-        
-        # Find all Job Finder pages
-        print("Searching for 'Job Finder' pages in Notion...")
-        all_job_finder_pages = find_page_by_title(notion_token, "Job Finder", partial_match=False)
-        if not all_job_finder_pages:
-            return False, "No pages found with title 'Job Finder'"
-        
-        # Find the Job Finder page that is under "Notion Eval Page"
-        target_job_finder_page = None
-        print(f"Found {len(all_job_finder_pages)} 'Job Finder' pages, checking which is under Notion Eval Page...")
-        
-        for i, page in enumerate(all_job_finder_pages):
-            print(f"Checking Job Finder page {i+1}: {page['title']} (ID: {page['id']})")
-            try:
-                # Get page details including parent information
-                page_details = get_notion_page_properties(page['id'], notion_token)
-                parent = page_details.get('parent', {})
-                print(f"    Parent type: {parent.get('type')}")
-                
-                if parent.get('type') == 'page_id':
-                    parent_id = parent.get('page_id')
-                    print(f"    Parent ID: {parent_id}")
-                    try:
-                        parent_page = get_notion_page_properties(parent_id, notion_token)
-                        parent_props = parent_page.get('properties', {})
-                        parent_title_prop = parent_props.get('title', {}).get('title', [])
-                        parent_title = ''.join([part.get('text', {}).get('content', '') for part in parent_title_prop])
-                        print(f"    Parent page title: '{parent_title}'")
-                        
-                        if 'Notion Eval Page' in parent_title:
-                            print(f"    ✅ Found Job Finder page under Notion Eval Page!")
-                            target_job_finder_page = page
-                            break
-                    except Exception as e:
-                        print(f"    Error getting parent page: {e}")
-                else:
-                    print(f"    ❌ No page parent (type: {parent.get('type')})")
-            except Exception as e:
-                print(f"    Error checking page parent: {e}")
-        
-        if not target_job_finder_page:
-            return False, "No Job Finder page found under Notion Eval Page"
-        
-        job_finder_page = target_job_finder_page
+        task_root = parent_dir
+        eval_page_id = NotionPageProtector.extract_page_id_from_url(
+            eval_page_url
+        )
+        job_finder_page = _get_attributed_job_finder_page(
+            task_root, notion_token, eval_page_id
+        )
         print(f"Using Job Finder page: {job_finder_page['title']} (ID: {job_finder_page['id']})")
         
         # Find the Job Tracker database within the Job Finder page
