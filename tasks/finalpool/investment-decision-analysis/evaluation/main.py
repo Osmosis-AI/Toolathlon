@@ -175,24 +175,28 @@ def compare_sheets(expected_data: List[List[Any]], actual_data: List[List[Any]],
                 # 1-2%.  3% absorbs that variance while still rejecting
                 # genuinely-wrong answers (wrong ticker / year would differ
                 # by >10%).
-                exp_float = float(expected_norm)
-                act_float = float(actual_norm)
-
-                if abs(exp_float) < 1e-6:  # Near-zero values
-                    tolerance = 0.03  # Absolute tolerance for near-zero
+                try:
+                    exp_float = float(expected_norm)
+                    act_float = float(actual_norm)
+                except ValueError:
+                    pass
                 else:
-                    tolerance = abs(exp_float) * 0.03  # 3% relative tolerance
+                    if abs(exp_float) < 1e-6:  # Near-zero values
+                        tolerance = 0.03  # Absolute tolerance for near-zero
+                    else:
+                        tolerance = abs(exp_float) * 0.03  # 3% relative tolerance
 
-                if abs(exp_float - act_float) <= tolerance:
-                    report["matched_cells"] += 1
-                else:
-                    report["mismatches"].append({
-                        "cell": f"{chr(65 + col_idx)}{row_idx + 1}",
-                        "expected": str(expected_val),
-                        "actual": str(actual_val),
-                        "expected_norm": expected_norm,
-                        "actual_norm": actual_norm
-                    })
+                    if abs(exp_float - act_float) <= tolerance:
+                        report["matched_cells"] += 1
+                        continue
+
+                report["mismatches"].append({
+                    "cell": f"{chr(65 + col_idx)}{row_idx + 1}",
+                    "expected": str(expected_val),
+                    "actual": str(actual_val),
+                    "expected_norm": expected_norm,
+                    "actual_norm": actual_norm
+                })
     
     return report
 

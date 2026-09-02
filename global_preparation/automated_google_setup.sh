@@ -695,11 +695,16 @@ with open('configs/token_key_session.py', 'r') as f:
     content = f.read()
 
 # Update Google-related fields
-content = re.sub(
-    r'google_cloud_console_api_key = "[^"]*"',
-    f'google_cloud_console_api_key = "${API_KEY}"',
-    content
-)
+for api_key_field in (
+    'google_cloud_console_api_key',
+    'google_maps_api_key',
+    'youtube_api_key',
+):
+    content = re.sub(
+        rf'{api_key_field} = "[^"]*"',
+        f'{api_key_field} = "${API_KEY}"',
+        content
+    )
 
 content = re.sub(
     r'gcp_project_id = "[^"]*"',

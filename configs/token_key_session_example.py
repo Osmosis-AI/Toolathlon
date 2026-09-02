@@ -32,6 +32,8 @@ all_token_key_session = Dict(
 
     #### Google
     google_cloud_console_api_key = "XX", # TO BE FILLED
+    google_maps_api_key = "XX", # TO BE FILLED
+    youtube_api_key = "XX", # TO BE FILLED
     
     gcp_project_id = "XX", # TO BE FILLED
     gcp_service_account_path = "configs/gcp-service_account.keys.json", # TO BE FILLED

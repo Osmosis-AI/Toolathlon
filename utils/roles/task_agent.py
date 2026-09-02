@@ -57,6 +57,7 @@ from utils.openai_agents_monkey_patch.tool_name_aliases import (
     build_tool_name_aliases,
     rewrite_tool_name_references,
     to_model_tool_choice,
+    to_model_tool_name,
     validate_model_tool_names,
 )
 
@@ -535,6 +536,12 @@ class TaskAgent:
             tools=local_tools,
             hooks=self.agent_hooks,
             model_settings=model_settings,
+            tool_use_behavior={
+                "stop_at_tool_names": [
+                    to_model_tool_name(name)
+                    for name in self.task_config.stop.tool_names
+                ]
+            },
         )
         
         # Get all available tools

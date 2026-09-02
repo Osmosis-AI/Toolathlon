@@ -145,6 +145,8 @@ def load_sensitive_values() -> Dict[str, str]:
         sensitive_keys = [
             'serper_api_key',
             'google_cloud_console_api_key',
+            'google_maps_api_key',
+            'youtube_api_key',
             'gcp_project_id',
             'google_client_id',
             'google_client_secret',
