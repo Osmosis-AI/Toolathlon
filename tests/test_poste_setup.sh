@@ -6,6 +6,7 @@ set -u
 TEST_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$TEST_DIR/.." && pwd)
 SETUP_SCRIPT="$REPO_ROOT/deployment/poste/scripts/setup.sh"
+CREATE_USERS_SCRIPT="$REPO_ROOT/deployment/poste/scripts/create_users.sh"
 TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/toolathlon-poste-setup.XXXXXX")
 FAKE_BIN="$TEST_ROOT/fake-bin"
 PASS_COUNT=0
@@ -47,12 +48,30 @@ cat > "$FAKE_BIN/docker" <<'EOF'
 #!/usr/bin/env bash
 state=${FAKE_POSTE_STATE:?}
 
+if [ "${1:-}" = ps ]; then
+    echo poste
+    exit 0
+fi
+
 if [ "${1:-}" != exec ]; then
     exit 0
 fi
-shift 2
+shift
+if [ "${1:-}" = --user=8 ]; then
+    shift 2
+else
+    shift
+fi
 
 case "${1:-}" in
+    php)
+        case "$*" in
+            *'domain:list'*) echo mcp.com ;;
+            *'email:create'*"${FAKE_CREATE_FAIL_EMAIL:-__never__}"*) exit 1 ;;
+            *'email:create'*|*'email:admin'*) exit 0 ;;
+            *'email:list'*) printf 'mcpposte_admin@mcp.com\nfirst@mcp.com\n' ;;
+        esac
+        ;;
     sh)
         script=${3:-}
         case "$script" in
@@ -244,6 +263,25 @@ fi
 
 run_start auth-failure failure
 assert_failure "rejected IMAP login fails readiness" "$START_RC"
+
+ROOT="$TEST_ROOT/partial-account/repo"
+STATE="$TEST_ROOT/partial-account/state"
+mkdir -p "$ROOT/deployment/poste/scripts" "$ROOT/configs" "$STATE"
+cp "$CREATE_USERS_SCRIPT" "$ROOT/deployment/poste/scripts/create_users.sh"
+cat > "$ROOT/configs/users_data.json" <<'EOF'
+{"users":[
+  {"id":1,"first_name":"First","last_name":"User","full_name":"First User","email":"first@mcp.com","password":"first-password"},
+  {"id":2,"first_name":"Second","last_name":"User","full_name":"Second User","email":"second@mcp.com","password":"second-password"}
+]}
+EOF
+(
+    cd "$ROOT" || exit 99
+    env PATH="$FAKE_BIN:$PATH" FAKE_POSTE_STATE="$STATE" \
+        FAKE_CREATE_FAIL_EMAIL=second@mcp.com \
+        /bin/bash deployment/poste/scripts/create_users.sh 2
+) > "$TEST_ROOT/partial-account/output" 2>&1
+CREATE_USERS_RC=$?
+assert_failure "a later mailbox creation failure fails the batch" "$CREATE_USERS_RC"
 
 echo "1..$((PASS_COUNT + FAIL_COUNT))"
 echo "# $PASS_COUNT passed; $FAIL_COUNT failed"
