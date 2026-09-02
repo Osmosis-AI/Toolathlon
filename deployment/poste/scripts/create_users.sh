@@ -289,4 +289,10 @@ fi
 
 echo ""
 echo "📄 Account details saved in: $ACCOUNTS_FILE"
+
+if [ "$SUCCESS_COUNT" -ne "$USER_COUNT" ]; then
+    echo "❌ Batch user creation failed"
+    exit 1
+fi
+
 echo "✨ Script execution completed!"

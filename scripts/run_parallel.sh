@@ -130,7 +130,7 @@ fi
 # Execute evaluation with custom config
 PYTHONUNBUFFERED=1 uv run run_parallel.py $ARGS 2>&1 | tee "$DUMP_PATH/stdout.log"
 
-EVAL_EXIT_CODE=$?
+EVAL_EXIT_CODE=${PIPESTATUS[0]}
 
 # Post-processing: Aggregate logs and create comprehensive statistics
 echo ""

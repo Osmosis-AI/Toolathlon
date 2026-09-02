@@ -90,15 +90,44 @@ start_container() {
   fi
 }
 
+wait_for_dovecot() {
+  local attempt=0
+
+  while [ "$attempt" -lt 120 ]; do
+    if printf 'a1 CAPABILITY\r\na2 LOGOUT\r\n' \
+        | timeout 3 nc -w 2 localhost "$IMAP_PORT" 2>/dev/null \
+        | grep -q 'IMAP4'; then
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 1
+  done
+
+  echo "❌ Dovecot did not become ready"
+  return 1
+}
+
 # Function to modify mail service config in container to allow plaintext auth
 configure_dovecot() {
+  local dovecot_pid
+
   echo "🔧 Configuring mail services to allow plaintext authentication..."
+
+  # Poste's startup config pass can overwrite this setting, so wait for live IMAP first.
+  wait_for_dovecot || return 1
 
   # Modify Dovecot SSL config: change ssl = required to ssl = yes
   $podman_or_docker exec $CONTAINER_NAME sed -i 's/ssl = required/ssl = yes/' /etc/dovecot/conf.d/10-ssl.conf
 
-  # Modify Dovecot auth config to allow cleartext authentication
-  $podman_or_docker exec $CONTAINER_NAME sed -i 's/auth_allow_cleartext = no/auth_allow_cleartext = yes/' /etc/dovecot/conf.d/10-auth.conf
+  # Replace the effective setting when present and append it when absent.
+  $podman_or_docker exec $CONTAINER_NAME sh -c '
+    config=/etc/dovecot/conf.d/10-auth.conf
+    if grep -Eq "^[[:space:]]*auth_allow_cleartext[[:space:]]*=" "$config"; then
+      sed -i "s/^[[:space:]]*auth_allow_cleartext[[:space:]]*=.*/auth_allow_cleartext = yes/" "$config"
+    else
+      printf "\nauth_allow_cleartext = yes\n" >> "$config"
+    fi
+  '
 
   # Clean up previously added wrong config
   $podman_or_docker exec $CONTAINER_NAME sed -i '/disable_plaintext_auth/d' /etc/dovecot/conf.d/10-auth.conf
@@ -124,19 +153,28 @@ configure_dovecot() {
 
   # Verify Dovecot config
   echo "🔍 Verifying Dovecot configuration..."
-  if $podman_or_docker exec $CONTAINER_NAME doveconf -n > /dev/null 2>&1; then
-    echo "✅ Dovecot configuration is valid"
-  else
+  if ! $podman_or_docker exec $CONTAINER_NAME doveconf -n > /dev/null 2>&1; then
     echo "❌ Dovecot configuration error, checking..."
     $podman_or_docker exec $CONTAINER_NAME doveconf -n
     return 1
   fi
+  if ! $podman_or_docker exec $CONTAINER_NAME doveconf -n 2>/dev/null \
+      | grep -Eq '^auth_allow_cleartext = yes$'; then
+    echo "❌ Dovecot plaintext authentication setting is not effective"
+    return 1
+  fi
+  echo "✅ Dovecot configuration is valid"
 
   # Reload service config
   echo "🔄 Reloading mail service configurations..."
-  $podman_or_docker exec $CONTAINER_NAME doveadm reload 2>/dev/null || \
-  $podman_or_docker exec $CONTAINER_NAME kill -HUP $($podman_or_docker exec $CONTAINER_NAME pgrep dovecot | head -1) 2>/dev/null || \
-  echo "⚠️  Failed to reload Dovecot"
+  if ! $podman_or_docker exec $CONTAINER_NAME doveadm reload 2>/dev/null; then
+    dovecot_pid=$($podman_or_docker exec $CONTAINER_NAME pgrep dovecot 2>/dev/null | head -1)
+    if [ -z "$dovecot_pid" ] \
+        || ! $podman_or_docker exec $CONTAINER_NAME kill -HUP "$dovecot_pid" 2>/dev/null; then
+      echo "❌ Failed to reload Dovecot"
+      return 1
+    fi
+  fi
 
   # Restart Haraka SMTP services
   echo "🔄 Restarting Haraka services..."
@@ -150,6 +188,38 @@ configure_dovecot() {
 # Function to create accounts
 create_accounts() {
   bash deployment/poste/scripts/create_users.sh $NUM_USERS
+}
+
+# Verify the mapped IMAP endpoint accepts the same plaintext login used by tasks.
+verify_imap_login() {
+  local email password quoted_email quoted_password response
+
+  IFS=$'\t' read -r email password < <(
+    jq -r '.users[0] | [.email, .password] | @tsv' configs/users_data.json
+  )
+  if [ -z "$email" ] || [ -z "$password" ]; then
+    echo "❌ IMAP fixture credential is missing"
+    return 1
+  fi
+
+  quoted_email=${email//\\/\\\\}
+  quoted_email=${quoted_email//\"/\\\"}
+  quoted_password=${password//\\/\\\\}
+  quoted_password=${quoted_password//\"/\\\"}
+
+  if ! response=$(printf 'a1 LOGIN "%s" "%s"\r\na2 LOGOUT\r\n' \
+      "$quoted_email" "$quoted_password" \
+      | timeout 10 nc -w 5 localhost "$IMAP_PORT" 2>/dev/null); then
+    echo "❌ IMAP plaintext login probe could not connect"
+    return 1
+  fi
+  if ! printf '%s\n' "$response" | grep -Eq '^a1 OK([[:space:]]|$)' \
+      || ! printf '%s\n' "$response" | grep -Eq '^a2 OK([[:space:]]|$)'; then
+    echo "❌ IMAP plaintext login probe failed"
+    return 1
+  fi
+
+  echo "✅ IMAP plaintext login verified"
 }
 
 # Function to perform cleanup
@@ -195,9 +265,10 @@ case "$COMMAND" in
     start_container
     sleep 10
     if [ "$CONFIGURE_DOVECOT" = "true" ]; then
-      configure_dovecot
+      configure_dovecot || exit 1
     fi
-    create_accounts
+    create_accounts || exit 1
+    verify_imap_login || exit 1
     ;;
   stop)
     stop_container
@@ -209,16 +280,17 @@ case "$COMMAND" in
     start_container
     sleep 10
     if [ "$CONFIGURE_DOVECOT" = "true" ]; then
-      configure_dovecot
+      configure_dovecot || exit 1
     fi
-    create_accounts
+    create_accounts || exit 1
+    verify_imap_login || exit 1
     ;;
   clean)
     stop_container
     perform_cleanup
     ;;
   config)
-    configure_dovecot
+    configure_dovecot || exit 1
     ;;
   *)
     echo "How to use: $0 {start|stop|restart|clean|config}"

@@ -1,7 +1,9 @@
 import asyncio
 import unittest
+from types import SimpleNamespace
+from unittest.mock import create_autospec
 
-from agents import FunctionTool, RunContextWrapper
+from agents import FunctionTool, Model, RunContextWrapper
 from agents._run_impl import ResponseFunctionToolCall
 from agents.mcp.util import MCPUtil
 from mcp.types import CallToolResult, TextContent, Tool as MCPTool
@@ -19,6 +21,7 @@ from utils.openai_agents_monkey_patch.tool_name_aliases import (
     to_model_tool_name,
     validate_model_tool_names,
 )
+from utils.roles.task_agent import TaskAgent
 from utils.task_runner.termination_checkers import default_termination_checker
 
 
@@ -219,6 +222,42 @@ class ModelToolNameAliasTests(unittest.TestCase):
                 check_target="agent",
                 agent_stop_tools=["local_claim_done"],
             )
+        )
+
+
+class TaskAgentStopBehaviorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_setup_agent_stops_on_canonicalized_stop_tool(self):
+        fake_model = create_autospec(Model, instance=True)
+        task_agent = TaskAgent.__new__(TaskAgent)
+        task_agent.task_config = SimpleNamespace(
+            needed_local_tools=["claim_done"],
+            system_prompts=SimpleNamespace(agent="Call local-claim_done"),
+            stop=SimpleNamespace(tool_names=["local-claim_done"]),
+        )
+        task_agent.agent_config = SimpleNamespace(
+            model=SimpleNamespace(
+                provider="fake",
+                real_name="fake",
+                short_name="fake",
+            ),
+            generation=SimpleNamespace(extra_request_params={}),
+            tool=SimpleNamespace(tool_choice="auto", parallel_tool_calls=False),
+        )
+        task_agent.agent_model_provider = SimpleNamespace(
+            get_model=lambda *args, **kwargs: fake_model
+        )
+        task_agent.mcp_manager = SimpleNamespace(
+            get_all_connected_servers=lambda: []
+        )
+        task_agent.agent_hooks = None
+        task_agent.debug = False
+        task_agent.all_tools = []
+
+        await task_agent.setup_agent()
+
+        self.assertEqual(
+            task_agent.agent.tool_use_behavior,
+            {"stop_at_tool_names": ["local_claim_done"]},
         )
 
 
