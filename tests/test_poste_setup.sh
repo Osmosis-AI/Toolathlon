@@ -282,6 +282,13 @@ EOF
 ) > "$TEST_ROOT/partial-account/output" 2>&1
 CREATE_USERS_RC=$?
 assert_failure "a later mailbox creation failure fails the batch" "$CREATE_USERS_RC"
+if grep -Fq 'Successfully created: 1 users' "$TEST_ROOT/partial-account/output" \
+    && grep -Fq 'Failed to create: 1 users' "$TEST_ROOT/partial-account/output" \
+    && grep -Fq 'Batch user creation failed' "$TEST_ROOT/partial-account/output"; then
+    pass "partial mailbox failure reaches the final completeness guard"
+else
+    fail "partial mailbox failure reaches the final completeness guard"
+fi
 
 echo "1..$((PASS_COUNT + FAIL_COUNT))"
 echo "# $PASS_COUNT passed; $FAIL_COUNT failed"
