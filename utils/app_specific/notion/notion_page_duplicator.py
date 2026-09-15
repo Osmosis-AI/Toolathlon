@@ -67,9 +67,10 @@ _NOTION_OFFICIAL_LOCK_WAIT_SECONDS = 1200  # > op cap + margin; under the task t
 # Must stay under the op cap, or the cap always fires first and the failure
 # reports "hung" for a page that was merely slow to materialise.
 _NOTION_OFFICIAL_PAGE_READY_SECONDS = 240
-# The Playwright path runs in a worker thread and cannot be cancelled, so it
-# bounds itself here instead of by the attempt cap.
+# Self-bounded because a worker thread cannot be cancelled: this budget plus
+# the move/rename tail must stay under _NOTION_OFFICIAL_LOCK_WAIT_SECONDS.
 _NOTION_OFFICIAL_PLAYWRIGHT_URL_WAIT_MS = 300_000
+_NOTION_OFFICIAL_PLAYWRIGHT_DUPLICATE_SECONDS = 600
 
 
 async def _acquire_notion_official_lock(timeout_seconds: float = _NOTION_OFFICIAL_LOCK_WAIT_SECONDS):
@@ -345,6 +346,9 @@ class NotionPageDuplicator:
                 print(f"Navigating to source page: {source_page_url}")
                 initial_url = page.url if hasattr(page, 'url') else None
                 
+                duplicate_deadline = (
+                    time.monotonic() + _NOTION_OFFICIAL_PLAYWRIGHT_DUPLICATE_SECONDS
+                )
                 attempt_num = 0
                 while attempt_num < 3:
                     page.goto(source_page_url, wait_until="load", timeout=60_000)
@@ -402,10 +406,16 @@ class NotionPageDuplicator:
                     print("Waiting for duplication to complete...")
 
                     # Wait for URL to change from the original page
+                    remaining_ms = int(
+                        max(0.0, duplicate_deadline - time.monotonic()) * 1000
+                    )
                     try:
                         page.wait_for_url(
                             lambda url: url != original_url,
-                            timeout=_NOTION_OFFICIAL_PLAYWRIGHT_URL_WAIT_MS,
+                            timeout=max(
+                                30_000,
+                                min(_NOTION_OFFICIAL_PLAYWRIGHT_URL_WAIT_MS, remaining_ms),
+                            ),
                         )
                         print("We have go to the new page!")
                         break
@@ -413,6 +423,12 @@ class NotionPageDuplicator:
                         attempt_num+=1
                         if attempt_num >= 3:
                             raise Exception("Failed to duplicate the page after 3 attempts")
+                        if time.monotonic() >= duplicate_deadline:
+                            raise Exception(
+                                "notion_official playwright duplicate exceeded "
+                                f"{_NOTION_OFFICIAL_PLAYWRIGHT_DUPLICATE_SECONDS}s; "
+                                "releasing the lock instead of starving queued peers"
+                            )
                         print("Retrying duplication...")
 
                 # Keep checking until we get to a page that is neither the original nor the source parent
