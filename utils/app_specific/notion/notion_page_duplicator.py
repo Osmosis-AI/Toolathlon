@@ -64,6 +64,13 @@ _NOTION_OFFICIAL_LOCK_PATH = "./configs/.mcp-auth/notion_official_refresh.lock"
 _NOTION_OFFICIAL_OP_CAP_SECONDS = 480
 _NOTION_OFFICIAL_OP_ATTEMPTS = 2
 _NOTION_OFFICIAL_LOCK_WAIT_SECONDS = 1200  # > op cap + margin; under the task timeout
+# Must stay under the op cap, or the cap always fires first and the failure
+# reports "hung" for a page that was merely slow to materialise.
+_NOTION_OFFICIAL_PAGE_READY_SECONDS = 240
+# Self-bounded because a worker thread cannot be cancelled: this budget plus
+# the move/rename tail must stay under _NOTION_OFFICIAL_LOCK_WAIT_SECONDS.
+_NOTION_OFFICIAL_PLAYWRIGHT_URL_WAIT_MS = 300_000
+_NOTION_OFFICIAL_PLAYWRIGHT_DUPLICATE_SECONDS = 600
 
 
 async def _acquire_notion_official_lock(timeout_seconds: float = _NOTION_OFFICIAL_LOCK_WAIT_SECONDS):
@@ -101,6 +108,38 @@ def _release_notion_official_lock(fd):
     except Exception:
         pass
     fd.close()
+
+
+async def _run_under_notion_official_lock(attempt_factory, label, cap=_NOTION_OFFICIAL_OP_CAP_SECONDS):
+    """Run one duplicate implementation while holding the notion_official flock.
+
+    The lock is released between attempts so a queued peer interleaves instead
+    of starving behind a hung session. ``cap=None`` is for implementations that
+    run in a worker thread: cancelling the await would free the lock while the
+    thread still held the OAuth state, so those bound themselves with their own
+    per-step timeouts instead.
+    """
+    for attempt in range(1, _NOTION_OFFICIAL_OP_ATTEMPTS + 1):
+        lock_fd = await _acquire_notion_official_lock()
+        try:
+            if cap is None:
+                return await attempt_factory()
+            return await asyncio.wait_for(attempt_factory(), timeout=cap)
+        except (TimeoutError, asyncio.TimeoutError):
+            if cap is None:
+                raise
+            if attempt >= _NOTION_OFFICIAL_OP_ATTEMPTS:
+                raise Exception(
+                    f"notion_official {label} exceeded {cap}s on all "
+                    f"{_NOTION_OFFICIAL_OP_ATTEMPTS} attempts"
+                )
+            print(
+                f"notion_official {label} exceeded {cap}s "
+                f"(attempt {attempt}/{_NOTION_OFFICIAL_OP_ATTEMPTS}); "
+                "tearing down and retrying with a fresh session..."
+            )
+        finally:
+            _release_notion_official_lock(lock_fd)
 
 # Import the protection module
 import sys
@@ -307,6 +346,9 @@ class NotionPageDuplicator:
                 print(f"Navigating to source page: {source_page_url}")
                 initial_url = page.url if hasattr(page, 'url') else None
                 
+                duplicate_deadline = (
+                    time.monotonic() + _NOTION_OFFICIAL_PLAYWRIGHT_DUPLICATE_SECONDS
+                )
                 attempt_num = 0
                 while attempt_num < 3:
                     page.goto(source_page_url, wait_until="load", timeout=60_000)
@@ -364,14 +406,29 @@ class NotionPageDuplicator:
                     print("Waiting for duplication to complete...")
 
                     # Wait for URL to change from the original page
+                    remaining_ms = int(
+                        max(0.0, duplicate_deadline - time.monotonic()) * 1000
+                    )
                     try:
-                        page.wait_for_url(lambda url: url != original_url, timeout=600_000)
+                        page.wait_for_url(
+                            lambda url: url != original_url,
+                            timeout=max(
+                                30_000,
+                                min(_NOTION_OFFICIAL_PLAYWRIGHT_URL_WAIT_MS, remaining_ms),
+                            ),
+                        )
                         print("We have go to the new page!")
                         break
                     except PlaywrightTimeoutError:
                         attempt_num+=1
                         if attempt_num >= 3:
                             raise Exception("Failed to duplicate the page after 3 attempts")
+                        if time.monotonic() >= duplicate_deadline:
+                            raise Exception(
+                                "notion_official playwright duplicate exceeded "
+                                f"{_NOTION_OFFICIAL_PLAYWRIGHT_DUPLICATE_SECONDS}s; "
+                                "releasing the lock instead of starving queued peers"
+                            )
                         print("Retrying duplication...")
 
                 # Keep checking until we get to a page that is neither the original nor the source parent
@@ -542,32 +599,26 @@ class NotionPageDuplicator:
         # mcp-remote subprocess starts until after it has torn down, and
         # each attempt is hard-capped: releasing between attempts lets a
         # queued peer interleave instead of starving behind a hung session.
-        duplicated_page_id = None
-        for attempt in range(1, _NOTION_OFFICIAL_OP_ATTEMPTS + 1):
-            lock_fd = await _acquire_notion_official_lock()
-            try:
-                duplicated_page_id = await asyncio.wait_for(
-                    self._duplicate_and_move_with_mcp(child_page_id, target_parent_id),
-                    timeout=_NOTION_OFFICIAL_OP_CAP_SECONDS,
-                )
-                break
-            except (TimeoutError, asyncio.TimeoutError):
-                if attempt >= _NOTION_OFFICIAL_OP_ATTEMPTS:
-                    raise Exception(
-                        f"notion_official duplicate+move exceeded "
-                        f"{_NOTION_OFFICIAL_OP_CAP_SECONDS}s on all "
-                        f"{_NOTION_OFFICIAL_OP_ATTEMPTS} attempts"
-                    )
-                print(
-                    f"notion_official duplicate+move exceeded "
-                    f"{_NOTION_OFFICIAL_OP_CAP_SECONDS}s "
-                    f"(attempt {attempt}/{_NOTION_OFFICIAL_OP_ATTEMPTS}); "
-                    "tearing down and retrying with a fresh session..."
-                )
-            finally:
-                _release_notion_official_lock(lock_fd)
+        duplicated_page_id = await _run_under_notion_official_lock(
+            lambda: self._duplicate_and_move_with_mcp(child_page_id, target_parent_id),
+            "duplicate+move",
+        )
         self.rename_page_via_api(duplicated_page_id, child_name)
         return f"https://www.notion.so/{duplicated_page_id.replace('-', '')}"
+
+    async def duplicate_page_with_playwright_locked(self, parent_of_source_page_url: str, source_page_url: str, target_parent_title: str, original_child_name: str) -> Optional[str]:
+        """The Playwright duplicate under the same flock as the MCP path."""
+        return await _run_under_notion_official_lock(
+            lambda: asyncio.to_thread(
+                self.duplicate_page_with_playwright,
+                parent_of_source_page_url,
+                source_page_url,
+                target_parent_title,
+                original_child_name,
+            ),
+            "playwright duplicate+move",
+            cap=None,
+        )
 
     async def _duplicate_and_move_with_mcp(self, child_page_id: str, target_parent_id: str) -> str:
         """One capped attempt: fresh MCP session, duplicate, wait ready, move.
@@ -593,13 +644,18 @@ class NotionPageDuplicator:
             print(f"Target parent ID: {target_parent_id}")
             # use notion api to check if the page is ready, if not we wait for 1s
 
-            timeout = 600
-            current_time = 0
+            timeout = _NOTION_OFFICIAL_PAGE_READY_SECONDS
+            deadline = time.monotonic() + timeout
             page_ready = False
             page_type = None
-            while current_time < timeout:
+            while time.monotonic() < deadline:
                 try:
-                    page_info = self.notion_client.pages.retrieve(page_id=duplicated_page_id)
+                    # In a thread: a stalled read would otherwise block the loop
+                    # and hold the flock past the cap. The leaked thread only
+                    # reads with the API token, never the rotating OAuth state.
+                    page_info = await asyncio.to_thread(
+                        self.notion_client.pages.retrieve, page_id=duplicated_page_id
+                    )
                     if page_info:
                         page_ready = True
                         page_type = page_info.get('object', 'unknown')
@@ -608,7 +664,6 @@ class NotionPageDuplicator:
                 except Exception as e:
                     print(f"Page not ready! Waiting for 1s... Error: {e}")
                     await asyncio.sleep(1)
-                    current_time += 1
             if not page_ready:
                 raise Exception(f"Page not ready after {timeout} seconds!")
 
@@ -709,7 +764,7 @@ class NotionPageDuplicator:
             
             # Duplicate the child page and move it to target parent
             if with_playwright:
-                duplicated_url = self.duplicate_page_with_playwright(source_parent_url, child_page_url, target_parent_title, child_name)
+                duplicated_url = asyncio.run(self.duplicate_page_with_playwright_locked(source_parent_url, child_page_url, target_parent_title, child_name))
             else:
                 duplicated_url = asyncio.run(self.duplicate_page_with_mcp(child_page_id, target_parent_id, child_name))
             
