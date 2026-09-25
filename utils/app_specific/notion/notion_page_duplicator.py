@@ -244,34 +244,36 @@ class NotionPageDuplicator:
             print(f"Error getting page title for {page_id}: {e}")
             return "Unknown"
     
-    def rename_page_via_api(self, page_id: str, new_title: str) -> bool:
-        """Rename a Notion page using the API."""
-        try:
-            # First, get the current title for validation
+    def rename_page_via_api(self, page_id: str, new_title: str, attempts: int = 6) -> bool:
+        """Rename a Notion page and confirm the new title reads back."""
+        for attempt in range(1, attempts + 1):
             try:
-                page = self.notion_client.pages.retrieve(page_id=page_id)
-                props = page.get("properties", {})
-                title_prop = props.get("title", {}).get("title") or props.get("Name", {}).get("title")
-                current_title = "".join(t.get("plain_text", "") for t in title_prop).strip() if title_prop else "Untitled"
-            except:
-                current_title = "Unknown"
+                current_title = self.get_page_title_by_id(page_id)
+                if current_title == new_title:
+                    print(f"Page renamed to: {new_title}")
+                    return True
 
-            # Validate the rename operation with protector
-            is_valid, error_msg = self.protector.validate_rename_operation(page_id, current_title, new_title)
-            if not is_valid:
-                print(f"ERROR: {error_msg}")
-                raise Exception(error_msg)
+                is_valid, error_msg = self.protector.validate_rename_operation(page_id, current_title, new_title)
+                if not is_valid:
+                    print(f"ERROR: {error_msg}")
+                    return False
 
-            # Proceed with rename
-            self.notion_client.pages.update(
-                page_id=page_id,
-                properties={"title": {"title": [{"text": {"content": new_title}}]}},
-            )
+                self.notion_client.pages.update(
+                    page_id=page_id,
+                    properties={"title": {"title": [{"text": {"content": new_title}}]}},
+                )
+            except Exception as e:
+                print(f"Rename attempt {attempt}/{attempts} failed: {e}")
+            # A just-moved copy can refuse the update or revert to its "(1)"
+            # title while Notion finishes duplicating it, so re-read and retry.
+            if attempt < attempts:
+                time.sleep(2 ** (attempt - 1))
+        final_title = self.get_page_title_by_id(page_id)
+        if final_title == new_title:
             print(f"Page renamed to: {new_title}")
             return True
-        except Exception as e:
-            print(f"Failed to rename page via API: {e}")
-            return False
+        print(f"Failed to rename page via API: title is still {final_title!r}")
+        return False
 
     def clear_modal_overlay(self, page: Page, timeout: int = 10_000) -> bool:
         """Try to clear modal overlay strategy"""
@@ -560,7 +562,8 @@ class NotionPageDuplicator:
 
                 # Step 3: Rename the duplicated page to remove any (1), (2) suffix
                 print(f"Renaming duplicated page to original name: {original_child_name}")
-                self.rename_page_via_api(duplicated_page_id, original_child_name)
+                if not self.rename_page_via_api(duplicated_page_id, original_child_name):
+                    raise Exception(f"Duplicated page was not renamed to {original_child_name!r}")
 
                 # Final validation: Check integrity of protected pages
                 for protected_id, expected_title in self.protector.PROTECTED_PAGES.items():
@@ -603,7 +606,10 @@ class NotionPageDuplicator:
             lambda: self._duplicate_and_move_with_mcp(child_page_id, target_parent_id),
             "duplicate+move",
         )
-        self.rename_page_via_api(duplicated_page_id, child_name)
+        # Evaluators look the copy up by its exact title, so a "(1)" suffix fails
+        # the task silently; fail preprocess instead.
+        if not self.rename_page_via_api(duplicated_page_id, child_name):
+            raise Exception(f"Duplicated page was not renamed to {child_name!r}")
         return f"https://www.notion.so/{duplicated_page_id.replace('-', '')}"
 
     async def duplicate_page_with_playwright_locked(self, parent_of_source_page_url: str, source_page_url: str, target_parent_title: str, original_child_name: str) -> Optional[str]:
