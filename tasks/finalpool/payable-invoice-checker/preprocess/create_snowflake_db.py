@@ -80,7 +80,7 @@ async def _recreate_database(server, name: str) -> None:
         arguments={"query": f"CREATE OR REPLACE DATABASE {name}"},
     )
     result_text = _raise_if_account_suspended(result)
-    if result_text.startswith("Error"):
+    if getattr(result, "isError", False) or result_text.startswith("Error"):
         raise RuntimeError(f"Failed to create database {name}: {result_text}")
 
 

@@ -275,6 +275,18 @@ class NotionPageDuplicator:
         print(f"Failed to rename page via API: title is still {final_title!r}")
         return False
 
+    def discard_page(self, page_id: str) -> None:
+        """Delete a copy that could not be renamed.
+
+        The next preprocess removes old copies by exact title, so a leftover
+        "(1)" copy would otherwise stay under the eval page.
+        """
+        try:
+            self.notion_client.blocks.delete(block_id=page_id)
+            print(f"Deleted unrenamed copy {page_id}")
+        except Exception as e:
+            print(f"WARNING: could not delete unrenamed copy {page_id}: {e}")
+
     def clear_modal_overlay(self, page: Page, timeout: int = 10_000) -> bool:
         """Try to clear modal overlay strategy"""
         modal_selector = "div.notion-modal-underlay"
@@ -563,6 +575,7 @@ class NotionPageDuplicator:
                 # Step 3: Rename the duplicated page to remove any (1), (2) suffix
                 print(f"Renaming duplicated page to original name: {original_child_name}")
                 if not self.rename_page_via_api(duplicated_page_id, original_child_name):
+                    self.discard_page(duplicated_page_id)
                     raise Exception(f"Duplicated page was not renamed to {original_child_name!r}")
 
                 # Final validation: Check integrity of protected pages
@@ -609,6 +622,7 @@ class NotionPageDuplicator:
         # Evaluators look the copy up by its exact title, so a "(1)" suffix fails
         # the task silently; fail preprocess instead.
         if not self.rename_page_via_api(duplicated_page_id, child_name):
+            self.discard_page(duplicated_page_id)
             raise Exception(f"Duplicated page was not renamed to {child_name!r}")
         return f"https://www.notion.so/{duplicated_page_id.replace('-', '')}"
 
