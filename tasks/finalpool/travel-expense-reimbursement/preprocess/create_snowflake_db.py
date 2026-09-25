@@ -50,8 +50,7 @@ def _raise_if_account_suspended(result):
 
 
 async def _recreate_database(server, name: str) -> None:
-    # The MCP server's create_databases/drop_databases crash when the account
-    # has no databases and never issue the CREATE; one statement resets it.
+    # create_databases fails on an account with no databases, so use one query
     result = await call_tool_with_retry(
         server,
         tool_name="write_query",

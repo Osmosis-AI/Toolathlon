@@ -71,11 +71,10 @@ _NOTION_OFFICIAL_PAGE_READY_SECONDS = 240
 # the move/rename tail must stay under _NOTION_OFFICIAL_LOCK_WAIT_SECONDS.
 _NOTION_OFFICIAL_PLAYWRIGHT_URL_WAIT_MS = 300_000
 _NOTION_OFFICIAL_PLAYWRIGHT_DUPLICATE_SECONDS = 600
-# Part of that tail on the Playwright path, which renames while holding the lock.
-# Worst case about 4 minutes: the budget plus one hung call (60s client timeout)
-# each for the last attempt, the final title read, and deleting the copy.
-_RENAME_BUDGET_SECONDS = 60
-_RENAME_SETTLE_SECONDS = 3
+# Rename retries for a duplicated page. On the Playwright path this runs under
+# the lock, so it is part of the move/rename tail above (up to ~4 min with hung calls).
+_RENAME_TIMEOUT_SECONDS = 60
+_RENAME_SETTLE_SECONDS = 3  # re-read the title after this long to make sure it stuck
 
 
 async def _acquire_notion_official_lock(timeout_seconds: float = _NOTION_OFFICIAL_LOCK_WAIT_SECONDS):
@@ -243,28 +242,23 @@ class NotionPageDuplicator:
             return "Unknown"
     
     def _read_title(self, page_id: str) -> str:
-        """The page's title; raises instead of guessing when it cannot be read."""
+        """Get the title of a page by its ID, raising if it cannot be read."""
         page = self.notion_client.pages.retrieve(page_id=page_id)
         props = page.get("properties", {})
         title_prop = props.get("title", {}).get("title") or props.get("Name", {}).get("title")
         return "".join(t.get("plain_text", "") for t in title_prop).strip() if title_prop else "Untitled"
 
-    def rename_page_via_api(
-        self, page_id: str, new_title: str, budget_seconds: float = _RENAME_BUDGET_SECONDS
-    ) -> bool:
-        """Rename a Notion page and confirm the new title holds."""
-        deadline = time.monotonic() + budget_seconds
+    def rename_page_via_api(self, page_id: str, new_title: str, timeout_seconds: float = _RENAME_TIMEOUT_SECONDS) -> bool:
+        """Rename a Notion page and confirm the new title sticks."""
+        deadline = time.monotonic() + timeout_seconds
         attempt = 0
         while True:
             attempt += 1
             try:
                 current_title = self._read_title(page_id)
                 if current_title == new_title:
-                    # A copy Notion is still duplicating can revert to its "(1)"
-                    # title, so the rename counts only once it survives a re-read.
+                    # Notion can revert the title while it finishes duplicating, so re-read it
                     if time.monotonic() + _RENAME_SETTLE_SECONDS >= deadline:
-                        # No time left to re-check; a correct title beats
-                        # deleting a copy that is already right.
                         print(f"Page renamed to: {new_title}")
                         return True
                     time.sleep(_RENAME_SETTLE_SECONDS)
@@ -288,32 +282,27 @@ class NotionPageDuplicator:
             if time.monotonic() + delay >= deadline:
                 break
             time.sleep(delay)
-        # The last update may have landed after its read; check once more
-        # rather than delete a copy that is already right.
+        # The last update may have landed after the last read
         try:
             if self._read_title(page_id) == new_title:
                 print(f"Page renamed to: {new_title}")
                 return True
         except Exception as e:
             print(f"Final title check failed: {e}")
-        print(f"Failed to rename page {page_id} to {new_title!r} within {budget_seconds:.0f}s")
+        print(f"Failed to rename page {page_id} to '{new_title}' within {timeout_seconds:.0f}s")
         return False
 
     def discard_page(self, page_id: str) -> None:
-        """Delete a copy that could not be renamed.
-
-        The next preprocess removes old copies by exact title, so a leftover
-        "(1)" copy would otherwise stay under the eval page.
-        """
+        """Delete a duplicated page that could not be renamed."""
         is_valid, error_msg = self.protector.validate_delete_operation(page_id)
         if not is_valid:
             print(f"ERROR: {error_msg}")
             return
         try:
             self.notion_client.blocks.delete(block_id=page_id)
-            print(f"Deleted unrenamed copy {page_id}")
+            print(f"Deleted duplicated page {page_id}")
         except Exception as e:
-            print(f"WARNING: could not delete unrenamed copy {page_id}: {e}")
+            print(f"WARNING: Could not delete duplicated page {page_id}: {e}")
 
     def clear_modal_overlay(self, page: Page, timeout: int = 10_000) -> bool:
         """Try to clear modal overlay strategy"""
@@ -604,7 +593,7 @@ class NotionPageDuplicator:
                 print(f"Renaming duplicated page to original name: {original_child_name}")
                 if not self.rename_page_via_api(duplicated_page_id, original_child_name):
                     self.discard_page(duplicated_page_id)
-                    raise Exception(f"Duplicated page was not renamed to {original_child_name!r}")
+                    raise Exception(f"Failed to rename duplicated page to '{original_child_name}'")
 
                 # Final validation: Check integrity of protected pages
                 for protected_id, expected_title in self.protector.PROTECTED_PAGES.items():
@@ -647,11 +636,10 @@ class NotionPageDuplicator:
             lambda: self._duplicate_and_move_with_mcp(child_page_id, target_parent_id),
             "duplicate+move",
         )
-        # Evaluators look the copy up by its exact title, so a "(1)" suffix fails
-        # the task silently; fail preprocess instead.
+        # Rename the duplicated page to remove any (1), (2) suffix
         if not self.rename_page_via_api(duplicated_page_id, child_name):
             self.discard_page(duplicated_page_id)
-            raise Exception(f"Duplicated page was not renamed to {child_name!r}")
+            raise Exception(f"Failed to rename duplicated page to '{child_name}'")
         return f"https://www.notion.so/{duplicated_page_id.replace('-', '')}"
 
     async def duplicate_page_with_playwright_locked(self, parent_of_source_page_url: str, source_page_url: str, target_parent_title: str, original_child_name: str) -> Optional[str]:
