@@ -237,14 +237,7 @@ class NotionPageDuplicator:
     def get_page_title_by_id(self, page_id: str) -> str:
         """Get the title of a page by its ID."""
         try:
-            page = self.notion_client.pages.retrieve(page_id=page_id)
-            props = page.get("properties", {})
-            title_prop = props.get("title", {}).get("title") or props.get("Name", {}).get("title")
-            
-            if title_prop:
-                return "".join(t.get("plain_text", "") for t in title_prop).strip()
-            return "Untitled"
-            
+            return self._read_title(page_id)
         except Exception as e:
             print(f"Error getting page title for {page_id}: {e}")
             return "Unknown"
