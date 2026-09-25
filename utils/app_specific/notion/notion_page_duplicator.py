@@ -71,7 +71,8 @@ _NOTION_OFFICIAL_PAGE_READY_SECONDS = 240
 # the move/rename tail must stay under _NOTION_OFFICIAL_LOCK_WAIT_SECONDS.
 _NOTION_OFFICIAL_PLAYWRIGHT_URL_WAIT_MS = 300_000
 _NOTION_OFFICIAL_PLAYWRIGHT_DUPLICATE_SECONDS = 600
-# Part of that tail on the Playwright path, which renames while holding the lock.
+# Part of that tail on the Playwright path, which renames while holding the lock;
+# checked between calls, so a hung call (60s client timeout) can add one more.
 _RENAME_BUDGET_SECONDS = 90
 _RENAME_SETTLE_SECONDS = 3
 
@@ -267,6 +268,8 @@ class NotionPageDuplicator:
                 if current_title == new_title:
                     # A copy Notion is still duplicating can revert to its "(1)"
                     # title, so the rename counts only once it survives a re-read.
+                    if time.monotonic() + _RENAME_SETTLE_SECONDS >= deadline:
+                        break
                     time.sleep(_RENAME_SETTLE_SECONDS)
                     if self._read_title(page_id) == new_title:
                         print(f"Page renamed to: {new_title}")
@@ -276,6 +279,8 @@ class NotionPageDuplicator:
                     if not is_valid:
                         print(f"ERROR: {error_msg}")
                         return False
+                    if time.monotonic() >= deadline:
+                        break
                     self.notion_client.pages.update(
                         page_id=page_id,
                         properties={"title": {"title": [{"text": {"content": new_title}}]}},
