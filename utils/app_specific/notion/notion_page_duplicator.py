@@ -294,6 +294,14 @@ class NotionPageDuplicator:
             if time.monotonic() + delay >= deadline:
                 break
             time.sleep(delay)
+        # The last update may have landed after its read; check once more
+        # rather than delete a copy that is already right.
+        try:
+            if self._read_title(page_id) == new_title:
+                print(f"Page renamed to: {new_title}")
+                return True
+        except Exception as e:
+            print(f"Final title check failed: {e}")
         print(f"Failed to rename page {page_id} to {new_title!r} within {budget_seconds:.0f}s")
         return False
 
