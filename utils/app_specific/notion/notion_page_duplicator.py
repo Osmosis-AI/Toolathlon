@@ -281,6 +281,10 @@ class NotionPageDuplicator:
         The next preprocess removes old copies by exact title, so a leftover
         "(1)" copy would otherwise stay under the eval page.
         """
+        is_valid, error_msg = self.protector.validate_delete_operation(page_id)
+        if not is_valid:
+            print(f"ERROR: {error_msg}")
+            return
         try:
             self.notion_client.blocks.delete(block_id=page_id)
             print(f"Deleted unrenamed copy {page_id}")
