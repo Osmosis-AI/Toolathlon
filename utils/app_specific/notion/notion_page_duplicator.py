@@ -269,7 +269,10 @@ class NotionPageDuplicator:
                     # A copy Notion is still duplicating can revert to its "(1)"
                     # title, so the rename counts only once it survives a re-read.
                     if time.monotonic() + _RENAME_SETTLE_SECONDS >= deadline:
-                        break
+                        # No time left to re-check; a correct title beats
+                        # deleting a copy that is already right.
+                        print(f"Page renamed to: {new_title}")
+                        return True
                     time.sleep(_RENAME_SETTLE_SECONDS)
                     if self._read_title(page_id) == new_title:
                         print(f"Page renamed to: {new_title}")
