@@ -71,9 +71,10 @@ _NOTION_OFFICIAL_PAGE_READY_SECONDS = 240
 # the move/rename tail must stay under _NOTION_OFFICIAL_LOCK_WAIT_SECONDS.
 _NOTION_OFFICIAL_PLAYWRIGHT_URL_WAIT_MS = 300_000
 _NOTION_OFFICIAL_PLAYWRIGHT_DUPLICATE_SECONDS = 600
-# Part of that tail on the Playwright path, which renames while holding the lock;
-# checked between calls, so a hung call (60s client timeout) can add one more.
-_RENAME_BUDGET_SECONDS = 90
+# Part of that tail on the Playwright path, which renames while holding the lock.
+# Worst case about 4 minutes: the budget plus one hung call (60s client timeout)
+# each for the last attempt, the final title read, and deleting the copy.
+_RENAME_BUDGET_SECONDS = 60
 _RENAME_SETTLE_SECONDS = 3
 
 
