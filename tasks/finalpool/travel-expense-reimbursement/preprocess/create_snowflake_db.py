@@ -49,6 +49,19 @@ def _raise_if_account_suspended(result):
     return result_text
 
 
+async def _recreate_database(server, name: str) -> None:
+    # The MCP server's create_databases/drop_databases crash when the account
+    # has no databases and never issue the CREATE; one statement resets it.
+    result = await call_tool_with_retry(
+        server,
+        tool_name="write_query",
+        arguments={"query": f"CREATE OR REPLACE DATABASE {name}"},
+    )
+    result_text = _raise_if_account_suspended(result)
+    if result_text.startswith("Error"):
+        raise RuntimeError(f"Failed to create database {name}: {result_text}")
+
+
 def slugify_email(name: str) -> str:
     name = name.lower().strip()
     name = re.sub(r"[^a-z0-9\s.]", "", name)
@@ -223,10 +236,7 @@ async def initialize_database():
     async with snowflake_server as server:
 
         print_color("Dropping and creating existing database ... ", "blue")
-        result = await call_tool_with_retry(server, tool_name="drop_databases", arguments={"databases": [DB_NAME]})
-        _raise_if_account_suspended(result)
-        result = await call_tool_with_retry(server, tool_name="create_databases", arguments={"databases": [DB_NAME]})
-        _raise_if_account_suspended(result)
+        await _recreate_database(server, DB_NAME)
         print_color("Dropped and created existing database", "green")
 
         print_color("Creating contacts table ... ", "blue")
