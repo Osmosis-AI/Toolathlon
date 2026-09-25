@@ -71,6 +71,9 @@ _NOTION_OFFICIAL_PAGE_READY_SECONDS = 240
 # the move/rename tail must stay under _NOTION_OFFICIAL_LOCK_WAIT_SECONDS.
 _NOTION_OFFICIAL_PLAYWRIGHT_URL_WAIT_MS = 300_000
 _NOTION_OFFICIAL_PLAYWRIGHT_DUPLICATE_SECONDS = 600
+# Part of that tail on the Playwright path, which renames while holding the lock.
+_RENAME_BUDGET_SECONDS = 90
+_RENAME_SETTLE_SECONDS = 3
 
 
 async def _acquire_notion_official_lock(timeout_seconds: float = _NOTION_OFFICIAL_LOCK_WAIT_SECONDS):
@@ -244,35 +247,46 @@ class NotionPageDuplicator:
             print(f"Error getting page title for {page_id}: {e}")
             return "Unknown"
     
-    def rename_page_via_api(self, page_id: str, new_title: str, attempts: int = 6) -> bool:
-        """Rename a Notion page and confirm the new title reads back."""
-        for attempt in range(1, attempts + 1):
+    def _read_title(self, page_id: str) -> str:
+        """The page's title; raises instead of guessing when it cannot be read."""
+        page = self.notion_client.pages.retrieve(page_id=page_id)
+        props = page.get("properties", {})
+        title_prop = props.get("title", {}).get("title") or props.get("Name", {}).get("title")
+        return "".join(t.get("plain_text", "") for t in title_prop).strip() if title_prop else "Untitled"
+
+    def rename_page_via_api(
+        self, page_id: str, new_title: str, budget_seconds: float = _RENAME_BUDGET_SECONDS
+    ) -> bool:
+        """Rename a Notion page and confirm the new title holds."""
+        deadline = time.monotonic() + budget_seconds
+        attempt = 0
+        while True:
+            attempt += 1
             try:
-                current_title = self.get_page_title_by_id(page_id)
+                current_title = self._read_title(page_id)
                 if current_title == new_title:
-                    print(f"Page renamed to: {new_title}")
-                    return True
-
-                is_valid, error_msg = self.protector.validate_rename_operation(page_id, current_title, new_title)
-                if not is_valid:
-                    print(f"ERROR: {error_msg}")
-                    return False
-
-                self.notion_client.pages.update(
-                    page_id=page_id,
-                    properties={"title": {"title": [{"text": {"content": new_title}}]}},
-                )
+                    # A copy Notion is still duplicating can revert to its "(1)"
+                    # title, so the rename counts only once it survives a re-read.
+                    time.sleep(_RENAME_SETTLE_SECONDS)
+                    if self._read_title(page_id) == new_title:
+                        print(f"Page renamed to: {new_title}")
+                        return True
+                else:
+                    is_valid, error_msg = self.protector.validate_rename_operation(page_id, current_title, new_title)
+                    if not is_valid:
+                        print(f"ERROR: {error_msg}")
+                        return False
+                    self.notion_client.pages.update(
+                        page_id=page_id,
+                        properties={"title": {"title": [{"text": {"content": new_title}}]}},
+                    )
             except Exception as e:
-                print(f"Rename attempt {attempt}/{attempts} failed: {e}")
-            # A just-moved copy can refuse the update or revert to its "(1)"
-            # title while Notion finishes duplicating it, so re-read and retry.
-            if attempt < attempts:
-                time.sleep(2 ** (attempt - 1))
-        final_title = self.get_page_title_by_id(page_id)
-        if final_title == new_title:
-            print(f"Page renamed to: {new_title}")
-            return True
-        print(f"Failed to rename page via API: title is still {final_title!r}")
+                print(f"Rename attempt {attempt} failed: {e}")
+            delay = min(2 ** (attempt - 1), 8)
+            if time.monotonic() + delay >= deadline:
+                break
+            time.sleep(delay)
+        print(f"Failed to rename page {page_id} to {new_title!r} within {budget_seconds:.0f}s")
         return False
 
     def discard_page(self, page_id: str) -> None:
