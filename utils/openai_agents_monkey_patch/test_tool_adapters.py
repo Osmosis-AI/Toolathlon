@@ -3,10 +3,19 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import create_autospec
 
-from agents import FunctionTool, Model, RunContextWrapper
+from agents import (
+    FunctionTool,
+    Model,
+    ModelResponse,
+    RunConfig,
+    RunContextWrapper,
+    Runner,
+    Usage,
+)
 from agents._run_impl import ResponseFunctionToolCall
 from agents.mcp.util import MCPUtil
-from mcp.types import CallToolResult, TextContent, Tool as MCPTool
+from mcp.types import CallToolResult, TextContent
+from mcp.types import Tool as MCPTool
 
 from utils.openai_agents_monkey_patch.custom_mcp_util import coerce_mcp_arguments
 from utils.openai_agents_monkey_patch.custom_run_impl import (
@@ -226,7 +235,7 @@ class ModelToolNameAliasTests(unittest.TestCase):
 
 
 class TaskAgentStopBehaviorTests(unittest.IsolatedAsyncioTestCase):
-    async def test_setup_agent_stops_on_canonicalized_stop_tool(self):
+    async def asyncSetUp(self):
         fake_model = create_autospec(Model, instance=True)
         task_agent = TaskAgent.__new__(TaskAgent)
         task_agent.task_config = SimpleNamespace(
@@ -246,19 +255,82 @@ class TaskAgentStopBehaviorTests(unittest.IsolatedAsyncioTestCase):
         task_agent.agent_model_provider = SimpleNamespace(
             get_model=lambda *args, **kwargs: fake_model
         )
-        task_agent.mcp_manager = SimpleNamespace(
-            get_all_connected_servers=lambda: []
-        )
+        task_agent.mcp_manager = SimpleNamespace(get_all_connected_servers=list)
         task_agent.agent_hooks = None
         task_agent.debug = False
         task_agent.all_tools = []
 
         await task_agent.setup_agent()
+        self.model = fake_model
+        self.agent = task_agent.agent
 
-        self.assertEqual(
-            task_agent.agent.tool_use_behavior,
-            {"stop_at_tool_names": ["local_claim_done"]},
+    def tool_response(self, *names):
+        return ModelResponse(
+            output=[
+                ResponseFunctionToolCall(
+                    arguments="{}",
+                    call_id=f"call-{i}-{name}",
+                    name=name,
+                    type="function_call",
+                )
+                for i, name in enumerate(names)
+            ],
+            usage=Usage(),
+            response_id=None,
         )
+
+    async def test_unknown_tool_error_reaches_model_before_claim_done(self):
+        self.agent.tools.append(_function_tool("filesystem_list_allowed_directories"))
+        self.model.get_response.side_effect = [
+            self.tool_response(
+                "local_list_allowed_directories", "filesystem_list_allowed_directories"
+            ),
+            self.tool_response("local_claim_done"),
+        ]
+
+        result = await Runner.run(
+            self.agent,
+            "Complete the task",
+            context={},
+            max_turns=2,
+            run_config=RunConfig(tracing_disabled=True),
+        )
+
+        self.assertEqual(result.final_output, "you have claimed the task is done!")
+        self.assertEqual(self.model.get_response.await_count, 2)
+        next_input = self.model.get_response.await_args_list[1].kwargs["input"]
+        outputs = [
+            item["output"]
+            for item in next_input
+            if item.get("type") == "function_call_output"
+        ]
+        self.assertEqual(
+            outputs,
+            ["Tool local_list_allowed_directories not found in agent Assistant", "ok"],
+        )
+
+    async def test_claim_done_stops_without_another_model_request(self):
+        for names in [
+            ("local_claim_done",),
+            ("local_list_allowed_directories", "local_claim_done"),
+            ("local_claim_done", "local_list_allowed_directories"),
+        ]:
+            with self.subTest(names=names):
+                self.model.get_response.reset_mock()
+                self.model.get_response.side_effect = [self.tool_response(*names)]
+
+                result = await Runner.run(
+                    self.agent,
+                    "Complete the task",
+                    context={},
+                    max_turns=1,
+                    run_config=RunConfig(tracing_disabled=True),
+                )
+
+                self.assertEqual(
+                    result.final_output, "you have claimed the task is done!"
+                )
+                self.model.get_response.assert_awaited_once()
 
 
 class MCPModelAliasTests(unittest.IsolatedAsyncioTestCase):

@@ -16,6 +16,7 @@ from agents import (
     # Runner,
     ModelSettings,
     ToolCallItem,
+    ToolsToFinalOutputResult,
     # MessageOutputItem,
     # ToolCallOutputItem,
     ModelProvider,
@@ -528,6 +529,19 @@ class TaskAgent:
         )
         agent_model.extra_request_params = self.agent_config.generation.extra_request_params
 
+        stop_tool_names = {
+            to_model_tool_name(name) for name in self.task_config.stop.tool_names
+        }
+
+        def stop_at_tools(context, tool_results):
+            # Upstream returns tool=None for unknown tools so the model can recover.
+            for result in tool_results:
+                if result.tool is not None and result.tool.name in stop_tool_names:
+                    return ToolsToFinalOutputResult(
+                        is_final_output=True, final_output=result.output
+                    )
+            return ToolsToFinalOutputResult(is_final_output=False, final_output=None)
+
         self.agent = Agent(
             name="Assistant",
             instructions=agent_instructions,
@@ -536,12 +550,7 @@ class TaskAgent:
             tools=local_tools,
             hooks=self.agent_hooks,
             model_settings=model_settings,
-            tool_use_behavior={
-                "stop_at_tool_names": [
-                    to_model_tool_name(name)
-                    for name in self.task_config.stop.tool_names
-                ]
-            },
+            tool_use_behavior=stop_at_tools,
         )
         
         # Get all available tools
