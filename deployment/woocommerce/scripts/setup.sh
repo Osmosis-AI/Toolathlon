@@ -121,7 +121,7 @@ if [ "$podman_or_docker" = "podman" ]; then
       -e MYSQL_DATABASE=wordpress \
       -e MYSQL_USER=wordpress \
       -e MYSQL_PASSWORD=wppass123 \
-      mysql:8.0
+      mysql:8.0@sha256:7dcddc01f13bab2f15cde676d44d01f61fc9f99fe7785e86196dfc07d358ae2b
 
     # Podman pod internal use 127.0.0.1
     DB_HOST="127.0.0.1"
@@ -134,7 +134,7 @@ else
       -e MYSQL_DATABASE=wordpress \
       -e MYSQL_USER=wordpress \
       -e MYSQL_PASSWORD=wppass123 \
-      mysql:8.0
+      mysql:8.0@sha256:7dcddc01f13bab2f15cde676d44d01f61fc9f99fe7785e86196dfc07d358ae2b
 
     # Docker network use container name
     DB_HOST=$WOO_DB
@@ -161,7 +161,7 @@ if [ "$podman_or_docker" = "podman" ]; then
       -e WORDPRESS_DB_USER=wordpress \
       -e WORDPRESS_DB_PASSWORD=wppass123 \
       -e WORDPRESS_DB_NAME=wordpress \
-      wordpress:6.8.2-php8.2-apache
+      wordpress:6.8.2-php8.2-apache@sha256:9973c15252ea54260c711e1074c96864acabebda379c664e812fa9bfe6fef268
 else
     # Docker: use --network and need to map port separately
     docker run -d \
@@ -172,7 +172,7 @@ else
       -e WORDPRESS_DB_USER=wordpress \
       -e WORDPRESS_DB_PASSWORD=wppass123 \
       -e WORDPRESS_DB_NAME=wordpress \
-      wordpress:6.8.2-php8.2-apache
+      wordpress:6.8.2-php8.2-apache@sha256:9973c15252ea54260c711e1074c96864acabebda379c664e812fa9bfe6fef268
 fi
 
 # 5. Wait for WordPress to be ready

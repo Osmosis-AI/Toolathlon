@@ -37,7 +37,7 @@ case $operation in
 
     # Start Canvas Docker container
     echo "Starting Canvas Docker container (port: $http_port)..."
-    $podman_or_docker run --name $container_name -p ${http_port}:3000 -d lbjay/canvas-docker
+    $podman_or_docker run --name $container_name -p ${http_port}:3000 -d lbjay/canvas-docker:latest@sha256:8d6b9efe3c2228008aa85d404a6a3e9acaf0ca7d70aea7374482bf7133a875d8
 
     # Wait for container to start
     echo "Waiting for Canvas container to start..."
