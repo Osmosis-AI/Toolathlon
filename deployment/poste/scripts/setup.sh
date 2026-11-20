@@ -51,7 +51,7 @@ start_container() {
   echo "📁 Data directory: $DATA_DIR"
   
   # Start Poste.io
-  # Mirror of analogic/poste.io:2.5.5 at its original digest; Docker Hub no longer serves that tag.
+  # Docker Hub deletes old poste.io tags on each release; move to the current 2.5.x when this pull fails.
   echo "🚀 Starting Poste.io..."
   $podman_or_docker run -d \
     --name $CONTAINER_NAME \
@@ -70,7 +70,7 @@ start_container() {
     -e "HTTPS=OFF" \
     -v ${DATA_DIR}:/data:Z \
     --hostname mcp.com \
-    ghcr.io/osmosis-ai/toolathlon-apps:poste.io-2.5.5@sha256:669424e4f51a92d9c7f57cd4f4a82da44d311d92b2573c1c9409d7ec25208113
+    analogic/poste.io:2.5.26@sha256:5acf59d94bfd2873040377d24dc3ae5607257df9032e73b9913e1998843ff4aa
 
   # Check start status
   if [ $? -eq 0 ]; then
