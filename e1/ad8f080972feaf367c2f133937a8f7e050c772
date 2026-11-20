@@ -1,0 +1,23 @@
+deployment/canvas/scripts/setup.sh
+  s_4ea94d8aa98ef0::t_c8192e6f575027 38,40
+deployment/poste/scripts/setup.sh
+  s_4ea94d8aa98ef0::t_52a56437685b5b 54,73
+deployment/woocommerce/scripts/setup.sh
+  s_4ea94d8aa98ef0::t_49ec22b1b105ad 124,137,164,175
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e1ad8f080972feaf367c2f133937a8f7e050c772",
+  "prompts": {},
+  "sessions": {
+    "s_4ea94d8aa98ef0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f74e9604-6276-4ecc-a8bb-fae15e767da2",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Allen Lin <allen@osmosis.ai>"
+    }
+  }
+}
