@@ -35,9 +35,9 @@ case $operation in
     $0 stop $2 $3 $4 $5 $6
     sleep 2
 
-    # Start Canvas Docker container
+    # Start Canvas Docker container (mirror of lbjay/canvas-docker:latest at its original digest)
     echo "Starting Canvas Docker container (port: $http_port)..."
-    $podman_or_docker run --name $container_name -p ${http_port}:3000 -d lbjay/canvas-docker
+    $podman_or_docker run --name $container_name -p ${http_port}:3000 -d ghcr.io/osmosis-ai/toolathlon-apps:canvas-docker-2017-11-08@sha256:8d6b9efe3c2228008aa85d404a6a3e9acaf0ca7d70aea7374482bf7133a875d8
 
     # Wait for container to start
     echo "Waiting for Canvas container to start..."
