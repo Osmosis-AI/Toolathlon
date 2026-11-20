@@ -1,0 +1,30 @@
+global_preparation/deploy_containers.sh
+  s_15aefbbd5a50dd::t_9ba648c9f4bd4d 289-293,295,297-307
+  s_15aefbbd5a50dd::t_cc81e957d95155 336-340
+  s_15aefbbd5a50dd::t_84eff16308d4be 138-144,263-273,280-281,288,308-313,317-319,325-326,333,335,341-363,366-367,369-380,383,386-390,493-495
+  s_15aefbbd5a50dd::t_98b8addc555ad6 296
+  s_15aefbbd5a50dd::t_43838b23968284 381-382,384-385
+  s_15aefbbd5a50dd::t_6fbedb87b29805 275,314-316,320-324,327-332,334,364-365,368,391
+  s_15aefbbd5a50dd::t_7a47efb152a625 294
+tests/test_deploy_containers_diagnostics.sh
+  s_15aefbbd5a50dd::t_9ba648c9f4bd4d 80-92,95,150,155-167,189,201-202,218-231,235-238,289-315
+  s_15aefbbd5a50dd::t_c6f224c8c65593 1-79,96-110,112-149,151-154,168-188,190-200,203-217,239-249,251,253-288,316-327
+  s_15aefbbd5a50dd::t_cc81e957d95155 111,250,252
+  s_15aefbbd5a50dd::t_7a47efb152a625 93-94,232-234
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "a16edeac9305f14cc115579c32aa66e2c4f19105",
+  "prompts": {},
+  "sessions": {
+    "s_15aefbbd5a50dd": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a05522-3db4-7372-98af-8e35e204eddc",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "JoyboyBrian <gzybrian@gmail.com>"
+    }
+  }
+}
