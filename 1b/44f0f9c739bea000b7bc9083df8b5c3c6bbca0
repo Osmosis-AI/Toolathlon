@@ -1,0 +1,20 @@
+deployment/poste/scripts/setup.sh
+  s_4ea94d8aa98ef0::t_859d349dd44ec3 54
+  s_4ea94d8aa98ef0::t_c07cd20859167a 73
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1b44f0f9c739bea000b7bc9083df8b5c3c6bbca0",
+  "prompts": {},
+  "sessions": {
+    "s_4ea94d8aa98ef0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f74e9604-6276-4ecc-a8bb-fae15e767da2",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Allen Lin <allen@osmosis.ai>"
+    }
+  }
+}
